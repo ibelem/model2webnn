@@ -22,7 +22,7 @@ model2webnn parses ML model files and generates self-contained JavaScript that u
 
 **Direct link:** Append `?url=` to auto-fetch a model:
 ```
-https://ibelem.github.io/model2webnn?url=https://huggingface.co/user/repo/resolve/main/model.onnx
+https://ibelem.github.io/model2webnn?url=https://huggingface.co/webnn/mobilenet-v2/resolve/main/onnx/model_fp16.onnx
 ```
 
 ### CLI
@@ -242,7 +242,7 @@ Create a new file in `src/codegen/` that accepts `GraphIR` and returns a string.
 |----------|-----------|
 | No NCHW↔NHWC conversion | Chromium handles transpose constant folding (CL [#6774969](https://chromium-review.googlesource.com/c/chromium/src/+/6774969)). ORT [PR #25679](https://github.com/microsoft/onnxruntime/pull/25679) removed NHWC preferred layout. |
 | Port ORT builders 1:1 | 107 ops battle-tested in production ONNX Runtime. Same attribute defaults and edge-case handling. |
-| WGWT weight format | Purpose-built for WebNN with validation magic header. Matches [webnn-graph](https://blog.ziade.org/webnn-graph) conventions. |
+| WGWT weight format | Purpose-built for WebNN with validation magic header |
 | Format-agnostic IR | Single `GraphIR` type shared by all parsers and code generators. Adding a format = writing one parser. |
 | Client-side only | Models never leave the browser. No server required. |
 | Vanilla TS + Vite | Zero framework dependencies. Fast builds. Deploys as a static site. |

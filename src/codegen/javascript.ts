@@ -172,6 +172,10 @@ export function generateJavaScript(
       if (!c) return 'float32';
       return c.dataType;
     },
+    constantRawData(tensorName: string): Uint8Array | null {
+      const c = constantMap.get(tensorName);
+      return c ? c.rawData : null;
+    },
   };
 
   // --- Emit graph inputs ---
@@ -385,6 +389,7 @@ export function generateJavaScriptFixed(
       return c ? c.shape.map((d) => (typeof d === 'number' ? d : 0)) : [];
     },
     constantDataType: (t: string) => constantMap.get(t)?.dataType ?? 'float32',
+    constantRawData: (t: string) => constantMap.get(t)?.rawData ?? null,
   };
 
   // --- Emit graph inputs ---

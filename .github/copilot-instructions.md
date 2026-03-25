@@ -47,13 +47,21 @@ reference/microsoft/onnxruntime/core/providers/webnn/builders/impl/
 - For composite ops (GQA, MHA, RotaryEmbedding, MatMulNBits, LSTM, GRU, Einsum), replicate the full decomposition
 - Only deviate if there is a clear bug or design issue — document any deviation with a comment explaining why
 
-### 2. No Layout Conversion
+### 2. Layout Handling
 
-Chromium handles transpose constant folding automatically.
-- Do NOT implement NCHW↔NHWC layout conversion
-- Do NOT reorder weight tensors for different layouts (no IHWO, no OHWI)
-- Pass all weights through as-is from the original model
+Weight tensors are passed through as-is from the original model — no data reordering.
+WebNN ops that support layout options must declare the correct layout matching the model's convention:
+
+**ONNX models:**
+- ONNX uses NCHW by default, which matches WebNN defaults — no layout options needed
 - Reference: ONNX Runtime PR #25679, Chromium CL #6774969
+
+**TFLite models (always NHWC):**
+- `conv2d`: `inputLayout: 'nhwc'`, `filterLayout: 'ohwi'` (Conv2D) or `'ihwo'` (DepthwiseConv2D)
+- `convTranspose2d`: `inputLayout: 'nhwc'`, `filterLayout: 'ohwi'`
+- `averagePool2d` / `maxPool2d` / `l2Pool2d`: `layout: 'nhwc'`
+- `resample2d`: `axes: [1, 2]` (spatial dims in NHWC)
+- Element-wise ops (add, mul, relu, etc.) are layout-agnostic
 
 ### 3. Weight File Format: WGWT
 
@@ -153,6 +161,7 @@ Generated WebNN code should:
 | WebNN spec text | `reference/webnn-spec/webnn.bs.txt` | Detailed op semantics |
 | webnn-graph examples | `reference/webnn-graph-main/examples/` | WGWT format, WeightsFile loader, buildGraph patterns |
 | webnn-code-generator | `reference/webnn-code-generator-main/src/` | Code generation patterns, UI patterns |
+| TFLite schema (online) | https://github.com/google-ai-edge/LiteRT/blob/main/tflite/converter/schema/schema.fbs | TFLite FlatBuffers schema (BuiltinOperator, BuiltinOptions, option tables) |
 
 ## WebNN Data Type Mapping
 

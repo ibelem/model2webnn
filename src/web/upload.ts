@@ -99,7 +99,7 @@ export async function fetchFromUrl(
 
   statusEl.style.display = '';
   statusEl.className = 'status-banner info';
-  statusEl.textContent = 'Fetching model from URL...';
+  statusEl.innerHTML = '<svg class="spinner" width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.5" stroke-dasharray="32" stroke-dashoffset="8" stroke-linecap="round"/></svg> Fetching model from URL...';
 
   try {
     const fetchUrl = transformHuggingFaceUrl(url);

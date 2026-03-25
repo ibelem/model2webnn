@@ -1,11 +1,15 @@
 // TFLite FlatBuffers parser → GraphIR
 // Parses .tflite files and produces a format-agnostic GraphIR.
 // Uses a manual FlatBuffers reader to avoid schema generation dependencies.
+//
+// Schema reference (LiteRT, successor to TensorFlow Lite):
+//   https://github.com/google-ai-edge/LiteRT/blob/main/tflite/converter/schema/schema.fbs
 
 import type { GraphIR, TensorInfo, ConstantInfo, NodeIR, MLOperandDataType } from '../ir/graph.js';
 import { tfliteDataType } from '../ir/graph.js';
 
-// TFLite TensorType enum values (from schema.fbs)
+// TFLite TensorType enum values
+// See: https://github.com/google-ai-edge/LiteRT/blob/main/tflite/converter/schema/schema.fbs
 const TensorType = {
   FLOAT32: 0,
   FLOAT16: 1,
@@ -28,7 +32,8 @@ const TensorType = {
   BFLOAT16: 18,
 } as const;
 
-// TFLite BuiltinOperator enum values (from schema.fbs) — commonly used ops
+// TFLite BuiltinOperator enum values — commonly used ops
+// See: https://github.com/google-ai-edge/LiteRT/blob/main/tflite/converter/schema/schema.fbs
 const BuiltinOperator: Record<number, string> = {
   0: 'ADD',
   1: 'AVERAGE_POOL_2D',
@@ -774,35 +779,68 @@ function readUnpackOptions(fb: FBReader, offset: number): Record<string, unknown
   return { num, axis };
 }
 
-// BuiltinOptions type index → parser (type indices from schema)
-const builtinOptionsParsers: Record<number, OptionsParser> = {
-  1: readConv2DOptions,           // Conv2DOptions
-  2: readDepthwiseConv2DOptions,  // DepthwiseConv2DOptions
-  3: readConcatenationOptions,    // ConcatenationOptions
-  4: readAddOptions,              // AddOptions
-  6: readPool2DOptions,           // Pool2DOptions
-  7: readReshapeOptions,          // ReshapeOptions
-  8: readSoftmaxOptions,          // SoftmaxOptions
-  9: readFullyConnectedOptions,   // FullyConnectedOptions
-  10: readAddOptions,             // MulOptions (same layout as Add)
-  14: readPadOptions,             // PadOptions
-  16: readGatherOptions,          // GatherOptions
-  18: readAddOptions,             // SubOptions (same layout)
-  19: readAddOptions,             // DivOptions (same layout)
-  20: readSqueezeOptions,         // SqueezeOptions
-  22: readCastOptions,            // CastOptions
-  25: readSliceOptions,           // SliceOptions
-  26: readTransposeConvOptions,   // TransposeConvOptions
-  27: readTransposeOptions,       // TransposeOptions
-  29: readMeanOptions,            // MeanOptions/ReducerOptions
-  31: readSplitOptions,           // SplitOptions
-  34: readStridedSliceOptions,    // StridedSliceOptions
-  35: readLeakyReluOptions,       // LeakyReluOptions
-  38: readResizeBilinearOptions,  // ResizeBilinearOptions
-  41: readPackOptions,            // PackOptions
-  43: readReducerOptions,         // ReducerOptions
-  46: readUnpackOptions,          // UnpackOptions
-  50: readResizeNearestNeighborOptions, // ResizeNearestNeighborOptions
+// BuiltinOperator code → options parser
+//
+// DESIGN DECISION: We map by BuiltinOperator enum value, NOT by builtinOptionsType.
+//
+// In the TFLite FlatBuffers schema, each Operator has two separate numbering systems:
+//   1. `opcode_index` → resolves to a BuiltinOperator enum (ADD=0, AVERAGE_POOL_2D=1, CONV_2D=3, ...)
+//   2. `builtin_options_type` → a FlatBuffers union index into the BuiltinOptions union
+//
+// The BuiltinOptions union is declared in schema.fbs as:
+//   union BuiltinOptions { Conv2DOptions, DepthwiseConv2DOptions, ... Pool2DOptions, ... }
+// The union type index is the 1-based position in this declaration, which does NOT match
+// the BuiltinOperator enum values. For example:
+//   - Conv2DOptions is union index 1, but CONV_2D is BuiltinOperator 3
+//   - Pool2DOptions is union index 5, but AVERAGE_POOL_2D is BuiltinOperator 1
+//   - TransposeConvOptions is union index 49, but TRANSPOSE_CONV is BuiltinOperator 67
+//
+// Mapping by BuiltinOperator code (approach used here) is more robust because:
+//   - The enum values are stored in the file itself (via OperatorCode table)
+//   - The mapping from op to its options parser is obvious and self-documenting
+//   - No need to manually count positions in a 120+ element union declaration
+//
+// Schema reference:
+//   https://github.com/google-ai-edge/LiteRT/blob/main/tflite/converter/schema/schema.fbs
+//   (LiteRT is the successor to TensorFlow Lite)
+//
+const operatorOptionsParsers: Record<number, OptionsParser> = {
+  0: readAddOptions,              // ADD
+  1: readPool2DOptions,           // AVERAGE_POOL_2D
+  2: readConcatenationOptions,    // CONCATENATION
+  3: readConv2DOptions,           // CONV_2D
+  4: readDepthwiseConv2DOptions,  // DEPTHWISE_CONV_2D
+  9: readFullyConnectedOptions,   // FULLY_CONNECTED
+  12: readPool2DOptions,          // L2_POOL_2D (same Pool2DOptions)
+  17: readPool2DOptions,          // MAX_POOL_2D
+  18: readAddOptions,             // MUL (same layout as AddOptions)
+  22: readReshapeOptions,         // RESHAPE
+  23: readResizeBilinearOptions,  // RESIZE_BILINEAR
+  25: readSoftmaxOptions,         // SOFTMAX
+  34: readPadOptions,             // PAD
+  36: readGatherOptions,          // GATHER
+  39: readTransposeOptions,       // TRANSPOSE
+  40: readMeanOptions,            // MEAN
+  41: readAddOptions,             // SUB (same layout)
+  42: readAddOptions,             // DIV (same layout)
+  43: readSqueezeOptions,         // SQUEEZE
+  45: readStridedSliceOptions,    // STRIDED_SLICE
+  49: readSplitOptions,           // SPLIT
+  53: readCastOptions,            // CAST
+  56: readReducerOptions,         // ARG_MAX
+  60: readPadOptions,             // PADV2
+  65: readSliceOptions,           // SLICE
+  67: readTransposeConvOptions,   // TRANSPOSE_CONV
+  74: readReducerOptions,         // SUM
+  79: readReducerOptions,         // ARG_MIN
+  81: readReducerOptions,         // REDUCE_PROD
+  82: readReducerOptions,         // REDUCE_MAX
+  83: readPackOptions,            // PACK
+  88: readUnpackOptions,          // UNPACK
+  89: readReducerOptions,         // REDUCE_MIN
+  91: readReducerOptions,         // REDUCE_ANY
+  97: readResizeNearestNeighborOptions, // RESIZE_NEAREST_NEIGHBOR
+  98: readLeakyReluOptions,       // LEAKY_RELU
 };
 
 // ──────────────────────────────────────────────────────
@@ -896,10 +934,10 @@ export async function parseTflite(buffer: Uint8Array): Promise<GraphIR> {
     const opcode = model.operatorCodes[op.opcodeIndex];
     const opType = opcode.customCode || BuiltinOperator[opcode.builtinCode] || `UNKNOWN_${opcode.builtinCode}`;
 
-    // Parse builtin options
+    // Parse builtin options — map by operator code (not builtinOptionsType index)
     let attributes: Record<string, unknown> = {};
     if (op.builtinOptionsType > 0 && op.builtinOptionsOffset > 0) {
-      const parser = builtinOptionsParsers[op.builtinOptionsType];
+      const parser = operatorOptionsParsers[opcode.builtinCode];
       if (parser) {
         attributes = parser(fb, op.builtinOptionsOffset);
       }

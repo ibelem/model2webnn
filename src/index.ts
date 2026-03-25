@@ -176,20 +176,19 @@ export function validateOperatorCoverage(graph: GraphIR): OperatorCoverage {
 export function detectFormat(buffer: Uint8Array): 'onnx' | 'tflite' | 'unknown' {
   if (buffer.length < 8) return 'unknown';
 
+  // TFLite: FlatBuffers format with "TFL3" file identifier at bytes 4-7
+  // Check this FIRST since the first byte (root table offset) can collide
+  // with ONNX protobuf field tags
+  const fileId = String.fromCharCode(buffer[4], buffer[5], buffer[6], buffer[7]);
+  if (fileId === 'TFL3') {
+    return 'tflite';
+  }
+
   // ONNX: protobuf format, starts with field 7 (graph) or field 1 (ir_version)
   // Check for protobuf wire format: field number 7, wire type 2 (length-delimited) = 0x3A
   // or field 1, wire type 0 (varint) = 0x08
   if (buffer[0] === 0x08 || buffer[0] === 0x3a || buffer[0] === 0x12) {
     return 'onnx';
-  }
-
-  // TFLite: FlatBuffers format — no universal magic, but typically starts with
-  // a root table offset. We check for common patterns.
-  // FlatBuffers files usually have the file identifier at bytes 4-7
-  // TFLite uses "TFL3" as file identifier
-  const fileId = String.fromCharCode(buffer[4], buffer[5], buffer[6], buffer[7]);
-  if (fileId === 'TFL3') {
-    return 'tflite';
   }
 
   // Fallback: try ONNX (protobuf can start with various field tags)

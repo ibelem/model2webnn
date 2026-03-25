@@ -483,13 +483,31 @@ function emitStridedSlice(node: NodeIR, emitter: CodeEmitter): void {
 function emitPad(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
   const output = emitter.declare(node.outputs[0]);
-  // TFLite PAD: inputs are data, paddings
-  if (node.inputs.length >= 2) {
-    const paddings = emitter.ref(node.inputs[1]);
-    emitter.line(`const ${output} = builder.pad(${input}, ${paddings});`);
-  } else {
-    emitter.line(`const ${output} = builder.pad(${input});`);
+  // TFLite PAD/PADV2: inputs[1] is a constant [N, 2] int32 tensor
+  // WebNN pad() requires (input, beginningPadding, endingPadding, options?)
+  if (node.inputs.length >= 2 && emitter.isConstant(node.inputs[1])) {
+    const rawData = emitter.constantRawData(node.inputs[1]);
+    if (rawData) {
+      const int32View = new Int32Array(rawData.buffer, rawData.byteOffset, rawData.byteLength / 4);
+      const n = int32View.length / 2;
+      const beginning: number[] = [];
+      const ending: number[] = [];
+      for (let i = 0; i < n; i++) {
+        beginning.push(int32View[i * 2]);
+        ending.push(int32View[i * 2 + 1]);
+      }
+      if (node.inputs.length >= 3 && node.inputs[2] !== '') {
+        const constVal = emitter.ref(node.inputs[2]);
+        emitter.line(`const ${output} = builder.pad(${input}, ${JSON.stringify(beginning)}, ${JSON.stringify(ending)}, { value: ${constVal} });`);
+      } else {
+        emitter.line(`const ${output} = builder.pad(${input}, ${JSON.stringify(beginning)}, ${JSON.stringify(ending)});`);
+      }
+      return;
+    }
   }
+  // Fallback: emit with empty padding arrays
+  emitter.comment('WARNING: pad constant data not available');
+  emitter.line(`const ${output} = builder.pad(${input}, [], []);`);
 }
 
 function emitTile(node: NodeIR, emitter: CodeEmitter): void {
@@ -637,8 +655,6 @@ function emitSoftmax(node: NodeIR, emitter: CodeEmitter): void {
 function emitResizeBilinear(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
   const output = emitter.declare(node.outputs[0]);
-  // Second input is the new size [height, width]
-  const newSize = node.inputs.length > 1 ? emitter.ref(node.inputs[1]) : undefined;
 
   const opts: string[] = [`mode: 'linear'`];
   if (node.attributes.half_pixel_centers) {
@@ -646,19 +662,25 @@ function emitResizeBilinear(node: NodeIR, emitter: CodeEmitter): void {
   } else if (node.attributes.align_corners) {
     opts.push(`coordinateTransformMode: 'align_corners'`);
   }
+  // TFLite uses NHWC — spatial dims are axes 1 and 2
+  opts.push(`axes: [1, 2]`);
+
+  // Second input is a constant [height, width] int32 tensor — extract as JS array
+  if (node.inputs.length > 1 && emitter.isConstant(node.inputs[1])) {
+    const rawData = emitter.constantRawData(node.inputs[1]);
+    if (rawData) {
+      const int32View = new Int32Array(rawData.buffer, rawData.byteOffset, rawData.byteLength / 4);
+      opts.push(`sizes: [${int32View[0]}, ${int32View[1]}]`);
+    }
+  }
 
   emitter.comment('RESIZE_BILINEAR');
-  if (newSize) {
-    emitter.line(`const ${output} = builder.resample2d(${input}, { ${opts.join(', ')}, sizes: ${newSize} });`);
-  } else {
-    emitter.line(`const ${output} = builder.resample2d(${input}, { ${opts.join(', ')} });`);
-  }
+  emitter.line(`const ${output} = builder.resample2d(${input}, { ${opts.join(', ')} });`);
 }
 
 function emitResizeNearestNeighbor(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
   const output = emitter.declare(node.outputs[0]);
-  const newSize = node.inputs.length > 1 ? emitter.ref(node.inputs[1]) : undefined;
 
   const opts: string[] = [`mode: 'nearest-neighbor'`];
   if (node.attributes.half_pixel_centers) {
@@ -666,13 +688,20 @@ function emitResizeNearestNeighbor(node: NodeIR, emitter: CodeEmitter): void {
   } else if (node.attributes.align_corners) {
     opts.push(`coordinateTransformMode: 'align_corners'`);
   }
+  // TFLite uses NHWC — spatial dims are axes 1 and 2
+  opts.push(`axes: [1, 2]`);
+
+  // Second input is a constant [height, width] int32 tensor — extract as JS array
+  if (node.inputs.length > 1 && emitter.isConstant(node.inputs[1])) {
+    const rawData = emitter.constantRawData(node.inputs[1]);
+    if (rawData) {
+      const int32View = new Int32Array(rawData.buffer, rawData.byteOffset, rawData.byteLength / 4);
+      opts.push(`sizes: [${int32View[0]}, ${int32View[1]}]`);
+    }
+  }
 
   emitter.comment('RESIZE_NEAREST_NEIGHBOR');
-  if (newSize) {
-    emitter.line(`const ${output} = builder.resample2d(${input}, { ${opts.join(', ')}, sizes: ${newSize} });`);
-  } else {
-    emitter.line(`const ${output} = builder.resample2d(${input}, { ${opts.join(', ')} });`);
-  }
+  emitter.line(`const ${output} = builder.resample2d(${input}, { ${opts.join(', ')} });`);
 }
 
 // ──────────────────────────────────────────────────────
@@ -896,12 +925,26 @@ function emitLogSoftmax(node: NodeIR, emitter: CodeEmitter): void {
 function emitMirrorPad(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
   const output = emitter.declare(node.outputs[0]);
-  if (node.inputs.length > 1) {
-    const paddings = emitter.ref(node.inputs[1]);
-    emitter.line(`const ${output} = builder.pad(${input}, ${paddings}, { mode: 'reflection' });`);
-  } else {
-    emitter.line(`const ${output} = builder.pad(${input}, { mode: 'reflection' });`);
+  // TFLite MIRROR_PAD: inputs[1] is a constant [N, 2] int32 tensor
+  // WebNN pad() requires (input, beginningPadding, endingPadding, options?)
+  if (node.inputs.length > 1 && emitter.isConstant(node.inputs[1])) {
+    const rawData = emitter.constantRawData(node.inputs[1]);
+    if (rawData) {
+      const int32View = new Int32Array(rawData.buffer, rawData.byteOffset, rawData.byteLength / 4);
+      const n = int32View.length / 2;
+      const beginning: number[] = [];
+      const ending: number[] = [];
+      for (let i = 0; i < n; i++) {
+        beginning.push(int32View[i * 2]);
+        ending.push(int32View[i * 2 + 1]);
+      }
+      emitter.line(`const ${output} = builder.pad(${input}, ${JSON.stringify(beginning)}, ${JSON.stringify(ending)}, { mode: 'reflection' });`);
+      return;
+    }
   }
+  // Fallback
+  emitter.comment('WARNING: mirror_pad constant data not available');
+  emitter.line(`const ${output} = builder.pad(${input}, [], [], { mode: 'reflection' });`);
 }
 
 // ──────────────────────────────────────────────────────

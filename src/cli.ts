@@ -126,8 +126,10 @@ async function main(): Promise<void> {
   const buffer = new Uint8Array(await readFile(inputPath));
   console.log(`Model size: ${(buffer.byteLength / 1024 / 1024).toFixed(2)} MB`);
 
-  // Detect and load external data files
-  const externalData = await loadExternalData(inputPath, buffer);
+  // Detect and load external data files (ONNX only)
+  const fileIdCheck = String.fromCharCode(buffer[4], buffer[5], buffer[6], buffer[7]);
+  const isTflite = fileIdCheck === 'TFL3';
+  const externalData = isTflite ? new Map<string, Uint8Array>() : await loadExternalData(inputPath, buffer);
 
   // Convert
   const weightsFileName = `${modelName}.weights`;
@@ -137,8 +139,7 @@ async function main(): Promise<void> {
   const freeDimensionOverrides = args.freeDims;
 
   // Quick-parse to detect free dimensions and warn about unresolved ones
-  const modelFormat = buffer[0] === 0x08 || buffer[0] === 0x3a || buffer[0] === 0x12 ? 'onnx' : 'tflite';
-  if (modelFormat === 'onnx') {
+  if (!isTflite) {
     const { parseOnnx } = await import('./parsers/onnx.js');
     const tempGraph = await parseOnnx(buffer, externalData.size > 0 ? externalData : undefined);
     const freeDims = getFreeDimensions(tempGraph);

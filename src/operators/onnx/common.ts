@@ -138,16 +138,42 @@ function emitGather(node: NodeIR, emitter: CodeEmitter): void {
 // pad_op_builder.cc
 function emitPad(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
-  const pads = emitter.ref(node.inputs[1]);
   const output = emitter.declare(node.outputs[0]);
   const mode = (node.attributes.mode as string) ?? 'constant';
 
-  const opts: string[] = [`mode: '${mode}'`];
-  if (node.inputs.length > 2 && node.inputs[2] !== '') {
-    opts.push(`value: ${emitter.ref(node.inputs[2])}`);
-  }
+  // ONNX pads: 1D int64 tensor [begin_0, begin_1, ..., end_0, end_1, ...]
+  // WebNN pad() requires (input, beginningPadding, endingPadding, options?)
+  if (emitter.isConstant(node.inputs[1])) {
+    const rawData = emitter.constantRawData(node.inputs[1]);
+    const dataType = emitter.constantDataType(node.inputs[1]);
+    if (rawData) {
+      let values: number[];
+      if (dataType === 'int64') {
+        const view = new BigInt64Array(rawData.buffer, rawData.byteOffset, rawData.byteLength / 8);
+        values = Array.from(view, (v) => Number(v));
+      } else {
+        const view = new Int32Array(rawData.buffer, rawData.byteOffset, rawData.byteLength / 4);
+        values = Array.from(view);
+      }
+      const half = values.length / 2;
+      const beginning = values.slice(0, half);
+      const ending = values.slice(half);
 
-  emitter.line(`const ${output} = builder.pad(${input}, ${pads}, { ${opts.join(', ')} });`);
+      const opts: string[] = [];
+      if (mode !== 'constant') {
+        opts.push(`mode: '${mode}'`);
+      }
+      if (node.inputs.length > 2 && node.inputs[2] !== '') {
+        opts.push(`value: ${emitter.ref(node.inputs[2])}`);
+      }
+      const optStr = opts.length > 0 ? `, { ${opts.join(', ')} }` : '';
+      emitter.line(`const ${output} = builder.pad(${input}, ${JSON.stringify(beginning)}, ${JSON.stringify(ending)}${optStr});`);
+      return;
+    }
+  }
+  // Fallback
+  emitter.comment('WARNING: pad constant data not available');
+  emitter.line(`const ${output} = builder.pad(${input}, [], []);`);
 }
 
 // tile_op_builder.cc
