@@ -1,15 +1,15 @@
 # model2webnn
 
-Convert `.onnx` and `.tflite` models into ready-to-run [WebNN API](https://www.w3.org/TR/webnn/) JavaScript/TypeScript code.
+Convert `.onnx` and `.tflite` models into ready-to-run [WebNN API](https://www.w3.org/TR/webnn/) JavaScript code.
 
-[**Try it online**](https://ibelem.github.io/model2webnn) | [WebNN Spec](https://www.w3.org/TR/webnn/) | [WebNN on MDN](https://developer.mozilla.org/en-US/docs/Web/API/WebNN_API)
+[**Try it online**](https://ibelem.github.io/model2webnn) | [WebNN Spec](https://www.w3.org/TR/webnn/) | [WebNN Netron](https://ibelem.github.io/netron/)
 
 ## Overview
 
-model2webnn parses ML model files and generates self-contained JavaScript or TypeScript that uses the WebNN `MLGraphBuilder` API. All processing runs client-side — models never leave the browser.
+model2webnn parses ML model files and generates self-contained JavaScript that uses the WebNN `MLGraphBuilder` API. All processing runs client-side — models never leave the browser.
 
 **Supported inputs:** ONNX (`.onnx`), TFLite (`.tflite`)
-**Outputs:** `.js` or `.ts` code, `.weights` binary, `.manifest.json`, optional `.html` test page
+**Outputs:** `.js` code, `.weights` binary, `.manifest.json`, optional `.html` test page
 
 ## Getting started
 
@@ -259,4 +259,4 @@ WebNN requires Chrome 131+ with the following flags enabled:
 ## References
 
 - [WebNN API Specification](https://www.w3.org/TR/webnn/)
-- [ONNX Runtime WebNN Provider](https://github.com/microsoft/onnxruntime/tree/main/onnxruntime/core/providers/webnn)
+- [WebNN Execution Provider of ONNX Runtime](https://github.com/microsoft/onnxruntime/tree/main/onnxruntime/core/providers/webnn)

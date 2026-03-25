@@ -10,6 +10,13 @@ export default defineConfig({
   build: {
     outDir: '../../dist',
     emptyOutDir: true,
+    rollupOptions: {
+      onwarn(warning, warn) {
+        // Suppress eval warning from protobufjs
+        if (warning.code === 'EVAL' && warning.id?.includes('@protobufjs')) return;
+        warn(warning);
+      },
+    },
   },
   server: {
     fs: {

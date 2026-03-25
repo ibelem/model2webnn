@@ -29,16 +29,16 @@
   },
   "dependencies": {
     "jszip": "^3.10.1",
-    "monaco-editor": "^0.52.2",
+    "monaco-editor": "^0.55.1",
     "onnx-proto": "^8.0.1"
   },
   "devDependencies": {
-    "@types/node": "^22.10.0",
+    "@types/node": "^25.5.0",
     "@webnn/types": "^0.1.1",
-    "tsx": "^4.19.0",
-    "typescript": "~5.8.3",
-    "vite": "^6.3.5",
+    "tsx": "^4.21.0",
+    "typescript": "~6.0.2",
+    "vite": "^8.0.2",
     "vite-plugin-monaco-editor-esm": "^2.0.2",
-    "vitest": "^3.1.0"
+    "vitest": "^4.1.1"
   }
 }

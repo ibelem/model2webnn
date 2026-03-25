@@ -40,7 +40,7 @@ function downloadHtml(): void {
 
 function downloadWeights(): void {
   if (!downloadResult) return;
-  const blob = new Blob([downloadResult.weights], { type: 'application/octet-stream' });
+  const blob = new Blob([downloadResult.weights.buffer as ArrayBuffer], { type: 'application/octet-stream' });
   downloadBlob(blob, `${downloadModelName}.weights`);
 }
 
