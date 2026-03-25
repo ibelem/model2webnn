@@ -1,9 +1,8 @@
 import { defineConfig } from 'vite';
-import monacoEditorEsmPlugin from 'vite-plugin-monaco-editor-esm';
 import { fileURLToPath, URL } from 'node:url';
 
 export default defineConfig({
-  plugins: [monacoEditorEsmPlugin()],
+  plugins: [],
   base: '/model2webnn/',
   root: 'src/web',
   publicDir: '../../public',
