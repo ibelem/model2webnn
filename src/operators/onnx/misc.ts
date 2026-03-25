@@ -1,0 +1,411 @@
+// Ported from: reference/microsoft/onnxruntime/core/providers/webnn/builders/impl/
+// Miscellaneous ops: Resize, GatherElements, GatherND, ScatterElements, ScatterND,
+// ArgMax, ArgMin, CumSum, DepthToSpace, SpaceToDepth, Trilu, Min, Max, Mean,
+// Equal, Greater, GreaterOrEqual, Less, LessOrEqual, Not, LogicalAnd, LogicalOr, Xor
+
+import type { NodeIR } from '../../ir/graph.js';
+import type { CodeEmitter } from '../registry.js';
+import { registerOnnxOp, registerOnnxOps } from '../registry.js';
+
+// resize_op_builder.cc
+function emitResize(node: NodeIR, emitter: CodeEmitter): void {
+  const input = emitter.ref(node.inputs[0]);
+  const output = emitter.declare(node.outputs[0]);
+
+  const mode = (node.attributes.mode as string) ?? 'nearest';
+  const opts: string[] = [];
+
+  if (mode === 'linear') {
+    opts.push(`mode: 'linear'`);
+  } else {
+    opts.push(`mode: 'nearest-neighbor'`);
+  }
+
+  // scales input (index 2) or sizes input (index 3)
+  const hasScales = node.inputs.length > 2 && node.inputs[2] !== '';
+  const hasSizes = node.inputs.length > 3 && node.inputs[3] !== '';
+
+  if (hasSizes) {
+    opts.push(`sizes: ${emitter.ref(node.inputs[3])}`);
+  } else if (hasScales) {
+    opts.push(`scales: ${emitter.ref(node.inputs[2])}`);
+  }
+
+  const coordinateTransformMode = node.attributes.coordinate_transformation_mode as string | undefined;
+  if (coordinateTransformMode === 'align_corners') {
+    opts.push(`alignCorners: true`);
+  } else if (coordinateTransformMode === 'half_pixel') {
+    opts.push(`halfPixelCenters: true`);
+  }
+
+  emitter.line(`const ${output} = builder.resample2d(${input}, { ${opts.join(', ')} });`);
+}
+
+// gather_elements_op_builder.cc
+function emitGatherElements(node: NodeIR, emitter: CodeEmitter): void {
+  const input = emitter.ref(node.inputs[0]);
+  const indices = emitter.ref(node.inputs[1]);
+  const output = emitter.declare(node.outputs[0]);
+  const axis = (node.attributes.axis as number) ?? 0;
+  emitter.line(`const ${output} = builder.gatherElements(${input}, ${indices}, { axis: ${axis} });`);
+}
+
+// gathernd_op_builder.cc
+function emitGatherND(node: NodeIR, emitter: CodeEmitter): void {
+  const input = emitter.ref(node.inputs[0]);
+  const indices = emitter.ref(node.inputs[1]);
+  const output = emitter.declare(node.outputs[0]);
+  emitter.line(`const ${output} = builder.gatherND(${input}, ${indices});`);
+}
+
+// scatter_elements_op_builder.cc
+function emitScatterElements(node: NodeIR, emitter: CodeEmitter): void {
+  const input = emitter.ref(node.inputs[0]);
+  const indices = emitter.ref(node.inputs[1]);
+  const updates = emitter.ref(node.inputs[2]);
+  const output = emitter.declare(node.outputs[0]);
+  const axis = (node.attributes.axis as number) ?? 0;
+  emitter.line(`const ${output} = builder.scatterElements(${input}, ${indices}, ${updates}, { axis: ${axis} });`);
+}
+
+// scatternd_op_builder.cc
+function emitScatterND(node: NodeIR, emitter: CodeEmitter): void {
+  const input = emitter.ref(node.inputs[0]);
+  const indices = emitter.ref(node.inputs[1]);
+  const updates = emitter.ref(node.inputs[2]);
+  const output = emitter.declare(node.outputs[0]);
+  emitter.line(`const ${output} = builder.scatterND(${input}, ${indices}, ${updates});`);
+}
+
+// argmax_min_op_builder.cc
+function emitArgMaxMin(node: NodeIR, emitter: CodeEmitter): void {
+  const input = emitter.ref(node.inputs[0]);
+  const output = emitter.declare(node.outputs[0]);
+  const webnnOp = node.opType === 'ArgMax' ? 'argMax' : 'argMin';
+  const axis = (node.attributes.axis as number) ?? 0;
+  const keepdims = (node.attributes.keepdims as number) ?? 1;
+
+  const opts: string[] = [];
+  if (!keepdims) opts.push(`keepDimensions: false`);
+
+  const optsStr = opts.length > 0 ? `, { ${opts.join(', ')} }` : '';
+  emitter.line(`const ${output} = builder.${webnnOp}(${input}, ${axis}${optsStr});`);
+}
+
+// cumsum_op_builder.cc
+function emitCumSum(node: NodeIR, emitter: CodeEmitter): void {
+  const input = emitter.ref(node.inputs[0]);
+  const axis = emitter.ref(node.inputs[1]);
+  const output = emitter.declare(node.outputs[0]);
+  const exclusive = (node.attributes.exclusive as number) ?? 0;
+  const reverse = (node.attributes.reverse as number) ?? 0;
+
+  const opts: string[] = [];
+  if (exclusive) opts.push(`exclusive: true`);
+  if (reverse) opts.push(`reversed: true`);
+
+  const optsStr = opts.length > 0 ? `, { ${opts.join(', ')} }` : '';
+  emitter.line(`const ${output} = builder.cumulativeSum(${input}, ${axis}${optsStr});`);
+}
+
+// depth_space_op_builder.cc
+function emitDepthToSpace(node: NodeIR, emitter: CodeEmitter): void {
+  const input = emitter.ref(node.inputs[0]);
+  const output = emitter.declare(node.outputs[0]);
+  const blocksize = (node.attributes.blocksize as number) ?? 1;
+  const mode = (node.attributes.mode as string) ?? 'DCR';
+  emitter.line(`const ${output} = builder.depthToSpace(${input}, ${blocksize}, { mode: '${mode === 'CRD' ? 'CRD' : 'DCR'}' });`);
+}
+
+function emitSpaceToDepth(node: NodeIR, emitter: CodeEmitter): void {
+  const input = emitter.ref(node.inputs[0]);
+  const output = emitter.declare(node.outputs[0]);
+  const blocksize = (node.attributes.blocksize as number) ?? 1;
+  emitter.line(`const ${output} = builder.spaceToDepth(${input}, ${blocksize});`);
+}
+
+// triangular_op_builder.cc
+function emitTrilu(node: NodeIR, emitter: CodeEmitter): void {
+  const input = emitter.ref(node.inputs[0]);
+  const output = emitter.declare(node.outputs[0]);
+  const upper = (node.attributes.upper as number) ?? 1;
+  const webnnOp = upper ? 'triangular' : 'triangular';
+  const opts: string[] = [];
+  if (!upper) opts.push(`upper: false`);
+  if (node.inputs.length > 1 && node.inputs[1] !== '') {
+    opts.push(`diagonal: ${emitter.ref(node.inputs[1])}`);
+  }
+  const optsStr = opts.length > 0 ? `, { ${opts.join(', ')} }` : '';
+  emitter.line(`const ${output} = builder.${webnnOp}(${input}${optsStr});`);
+}
+
+// logical_op_builder.cc
+function emitLogicalBinary(node: NodeIR, emitter: CodeEmitter): void {
+  const a = emitter.ref(node.inputs[0]);
+  const b = emitter.ref(node.inputs[1]);
+  const output = emitter.declare(node.outputs[0]);
+
+  const opMap: Record<string, string> = {
+    Equal: 'equal',
+    Greater: 'greater',
+    GreaterOrEqual: 'greaterOrEqual',
+    Less: 'lesser',
+    LessOrEqual: 'lesserOrEqual',
+  };
+  const webnnOp = opMap[node.opType] ?? 'equal';
+  emitter.line(`const ${output} = builder.${webnnOp}(${a}, ${b});`);
+}
+
+function emitLogicalNot(node: NodeIR, emitter: CodeEmitter): void {
+  const input = emitter.ref(node.inputs[0]);
+  const output = emitter.declare(node.outputs[0]);
+  emitter.line(`const ${output} = builder.logicalNot(${input});`);
+}
+
+// min/max/mean → element-wise reduction via chain
+function emitMinMaxMean(node: NodeIR, emitter: CodeEmitter): void {
+  const output = emitter.declare(node.outputs[0]);
+  const webnnOp = node.opType === 'Min' ? 'min' : node.opType === 'Max' ? 'max' : 'add';
+
+  if (node.inputs.length === 2) {
+    const a = emitter.ref(node.inputs[0]);
+    const b = emitter.ref(node.inputs[1]);
+    if (node.opType === 'Mean') {
+      const sum = emitter.declare(`${node.outputs[0]}_sum`);
+      emitter.line(`const ${sum} = builder.add(${a}, ${b});`);
+      emitter.line(`const ${output} = builder.div(${sum}, builder.constant({ dataType: 'float32', shape: [] }, new Float32Array([${node.inputs.length}])));`);
+    } else {
+      emitter.line(`const ${output} = builder.${webnnOp}(${a}, ${b});`);
+    }
+  } else {
+    // Chain multiple inputs
+    let result = emitter.ref(node.inputs[0]);
+    for (let i = 1; i < node.inputs.length; i++) {
+      const next = emitter.ref(node.inputs[i]);
+      const tmp = emitter.declare(`${node.outputs[0]}_chain_${i}`);
+      emitter.line(`const ${tmp} = builder.${webnnOp}(${result}, ${next});`);
+      result = tmp;
+    }
+    if (node.opType === 'Mean') {
+      emitter.line(`const ${output} = builder.div(${result}, builder.constant({ dataType: 'float32', shape: [] }, new Float32Array([${node.inputs.length}])));`);
+    } else {
+      emitter.line(`const ${output} = ${result};`);
+    }
+  }
+}
+
+// qdq_op_builder.cc — DequantizeLinear, QuantizeLinear
+// Ported from: reference/microsoft/onnxruntime/core/providers/webnn/builders/impl/qdq_op_builder.cc
+// WebNN signature: builder.dequantizeLinear(input, scale, zeroPoint, options?)
+//                  builder.quantizeLinear(input, scale, zeroPoint, options?)
+function emitQDQ(node: NodeIR, emitter: CodeEmitter): void {
+  const input = emitter.ref(node.inputs[0]);
+  const scale = emitter.ref(node.inputs[1]);
+  const output = emitter.declare(node.outputs[0]);
+  const hasZeroPoint = node.inputs.length > 2 && node.inputs[2] !== '';
+  const webnnOp = node.opType === 'DequantizeLinear' ? 'dequantizeLinear' : 'quantizeLinear';
+
+  // ORT qdq_op_builder.cc: For per-tensor quantization (scalar scale),
+  // WebNN requires scale and zeroPoint to have the same rank as input.
+  // For per-axis quantization with axis != last, scale must be reshaped for broadcasting.
+  // We handle this by checking if the scale is a scalar constant or per-axis.
+  const blockSize = (node.attributes.block_size as number) ?? 0;
+
+  // Determine if we need to reshape scale for broadcasting.
+  // If scale is a scalar constant, reshape it to match input rank.
+  // If scale is per-axis and axis != last, reshape for broadcasting.
+  let scaleRef = scale;
+  let zpRef: string;
+
+  if (emitter.isConstant(node.inputs[1])) {
+    const scaleShape = emitter.constantShape(node.inputs[1]);
+
+    if (scaleShape.length === 0) {
+      // Scalar scale — no reshaping needed, WebNN handles scalar broadcasting
+      scaleRef = scale;
+    } else if (scaleShape.length === 1 && blockSize === 0) {
+      // Per-axis quantization: if axis is specified and not last dim,
+      // we may need to let WebNN handle the broadcasting via the scale shape.
+      // The ORT builder reshapes scale to [1,...,scaleSize,...,1] for broadcasting.
+      // However, since we don't know input rank at codegen time, we emit the scale as-is
+      // and let WebNN handle it (WebNN spec does unidirectional broadcasting).
+      scaleRef = scale;
+    }
+  }
+
+  if (hasZeroPoint) {
+    zpRef = emitter.ref(node.inputs[2]);
+  } else {
+    // ORT: Create a zero constant with matching type.
+    // DequantizeLinear: zeroPoint type matches input type
+    // QuantizeLinear: zeroPoint type matches output type
+    // Use uint8 as default (most common for quantized models)
+    zpRef = `${output}_zp`;
+    emitter.line(`const ${zpRef} = builder.constant({dataType: 'uint8', shape: []}, new Uint8Array([0]));`);
+  }
+
+  emitter.line(`const ${output} = builder.${webnnOp}(${input}, ${scaleRef}, ${zpRef});`);
+}
+
+registerOnnxOp('Resize', emitResize);
+registerOnnxOp('GatherElements', emitGatherElements);
+registerOnnxOp('GatherND', emitGatherND);
+registerOnnxOp('ScatterElements', emitScatterElements);
+registerOnnxOp('ScatterND', emitScatterND);
+registerOnnxOp('ArgMax', emitArgMaxMin);
+registerOnnxOp('ArgMin', emitArgMaxMin);
+registerOnnxOp('CumSum', emitCumSum);
+registerOnnxOp('DepthToSpace', emitDepthToSpace);
+registerOnnxOp('SpaceToDepth', emitSpaceToDepth);
+registerOnnxOp('Trilu', emitTrilu);
+registerOnnxOps(['Equal', 'Greater', 'GreaterOrEqual', 'Less', 'LessOrEqual'], emitLogicalBinary);
+registerOnnxOp('Not', emitLogicalNot);
+registerOnnxOps(['Min', 'Max', 'Mean'], emitMinMaxMean);
+registerOnnxOps(['DequantizeLinear', 'QuantizeLinear'], emitQDQ);
+
+// logical_op_builder.cc — And, Or, Xor, IsInf, IsNaN
+function emitLogicalBinaryBool(node: NodeIR, emitter: CodeEmitter): void {
+  const a = emitter.ref(node.inputs[0]);
+  const b = emitter.ref(node.inputs[1]);
+  const output = emitter.declare(node.outputs[0]);
+  const opMap: Record<string, string> = { And: 'logicalAnd', Or: 'logicalOr', Xor: 'logicalXor' };
+  emitter.line(`const ${output} = builder.${opMap[node.opType]}(${a}, ${b});`);
+}
+registerOnnxOps(['And', 'Or', 'Xor'], emitLogicalBinaryBool);
+
+function emitIsInf(node: NodeIR, emitter: CodeEmitter): void {
+  const input = emitter.ref(node.inputs[0]);
+  const output = emitter.declare(node.outputs[0]);
+  const detectPositive = (node.attributes.detect_positive as number) ?? 1;
+  const detectNegative = (node.attributes.detect_negative as number) ?? 1;
+  if (detectPositive && detectNegative) {
+    emitter.line(`const ${output} = builder.isInfinite(${input});`);
+  } else if (detectPositive) {
+    emitter.line(`const ${output}_inf = builder.isInfinite(${input});`);
+    emitter.line(`const ${output}_pos = builder.greater(${input}, builder.constant({dataType: 'float32', shape: []}, new Float32Array([0])));`);
+    emitter.line(`const ${output} = builder.logicalAnd(${output}_inf, ${output}_pos);`);
+  } else if (detectNegative) {
+    emitter.line(`const ${output}_inf = builder.isInfinite(${input});`);
+    emitter.line(`const ${output}_neg = builder.lesser(${input}, builder.constant({dataType: 'float32', shape: []}, new Float32Array([0])));`);
+    emitter.line(`const ${output} = builder.logicalAnd(${output}_inf, ${output}_neg);`);
+  } else {
+    emitter.line(`const ${output}_inf = builder.isInfinite(${input});`);
+    emitter.line(`const ${output} = builder.logicalAnd(${output}_inf, builder.logicalNot(${output}_inf));`);
+  }
+}
+registerOnnxOp('IsInf', emitIsInf);
+
+function emitIsNaN(node: NodeIR, emitter: CodeEmitter): void {
+  const input = emitter.ref(node.inputs[0]);
+  const output = emitter.declare(node.outputs[0]);
+  emitter.line(`const ${output} = builder.isNaN(${input});`);
+}
+registerOnnxOp('IsNaN', emitIsNaN);
+
+// dynamicQuantizeLinear_op_builder.cc
+// Ported from: reference/microsoft/onnxruntime/core/providers/webnn/builders/impl/dynamicQuantizeLinear_op_builder.cc
+// Decomposes to: reduceMin/Max → scale computation → roundEven(zeroPoint) → cast → quantizeLinear
+function emitDynamicQuantizeLinear(node: NodeIR, emitter: CodeEmitter): void {
+  const input = emitter.ref(node.inputs[0]);
+  const y = emitter.declare(node.outputs[0]);
+  const yScale = node.outputs.length > 1 && node.outputs[1] !== '' ? emitter.declare(node.outputs[1]) : null;
+  const yZp = node.outputs.length > 2 && node.outputs[2] !== '' ? emitter.declare(node.outputs[2]) : null;
+  emitter.comment('DynamicQuantizeLinear');
+
+  // Q_Min = 0, Q_Max = 255
+  const qMin = `${y}_q_min`;
+  const qMax = `${y}_q_max`;
+  emitter.line(`const ${qMin} = builder.constant({dataType: 'float32', shape: []}, new Float32Array([0]));`);
+  emitter.line(`const ${qMax} = builder.constant({dataType: 'float32', shape: []}, new Float32Array([255]));`);
+
+  // X_Min = ReduceMin(x), X_Min_Adjusted = Min(X_Min, Q_Min)
+  const xMin = `${y}_x_min`;
+  emitter.line(`const ${xMin} = builder.reduceMin(${input});`);
+  const xMinAdj = `${y}_x_min_adj`;
+  emitter.line(`const ${xMinAdj} = builder.min(${xMin}, ${qMin});`);
+
+  // X_Max = ReduceMax(x), X_Max_Adjusted = Max(X_Max, Q_Min)
+  const xMax = `${y}_x_max`;
+  emitter.line(`const ${xMax} = builder.reduceMax(${input});`);
+  const xMaxAdj = `${y}_x_max_adj`;
+  emitter.line(`const ${xMaxAdj} = builder.max(${xMax}, ${qMin});`);
+
+  // Scale = (X_Max_Adjusted - X_Min_Adjusted) / 255
+  const xRange = `${y}_range`;
+  emitter.line(`const ${xRange} = builder.sub(${xMaxAdj}, ${xMinAdj});`);
+  const scale = `${y}_scale`;
+  emitter.line(`const ${scale} = builder.div(${xRange}, ${qMax});`);
+
+  // Initial_ZeroPoint = Q_Min - X_Min_Adjusted / Scale
+  // Clipped = Clamp(Initial_ZeroPoint, 0, 255)
+  // Rounded = RoundEven(Clipped)
+  // ZeroPoint = Cast(Rounded, 'uint8')
+  const minScaled = `${y}_min_scaled`;
+  emitter.line(`const ${minScaled} = builder.div(${xMinAdj}, ${scale});`);
+  const initZp = `${y}_init_zp`;
+  emitter.line(`const ${initZp} = builder.sub(${qMin}, ${minScaled});`);
+  const clippedZp = `${y}_clipped_zp`;
+  emitter.line(`const ${clippedZp} = builder.clamp(${initZp}, { minValue: 0, maxValue: 255 });`);
+  const roundedZp = `${y}_rounded_zp`;
+  emitter.line(`const ${roundedZp} = builder.roundEven(${clippedZp});`);
+  const zp = `${y}_zp`;
+  emitter.line(`const ${zp} = builder.cast(${roundedZp}, 'uint8');`);
+
+  // y = quantizeLinear(x, scale, zeroPoint)
+  emitter.line(`const ${y} = builder.quantizeLinear(${input}, ${scale}, ${zp});`);
+  if (yScale) emitter.line(`const ${yScale} = ${scale};`);
+  if (yZp) emitter.line(`const ${yZp} = ${zp};`);
+}
+registerOnnxOp('DynamicQuantizeLinear', emitDynamicQuantizeLinear);
+
+// lrn_op_builder.cc — Local Response Normalization
+function emitLRN(node: NodeIR, emitter: CodeEmitter): void {
+  const input = emitter.ref(node.inputs[0]);
+  const output = emitter.declare(node.outputs[0]);
+  const alpha = (node.attributes.alpha as number) ?? 0.0001;
+  const beta = (node.attributes.beta as number) ?? 0.75;
+  const bias = (node.attributes.bias as number) ?? 1.0;
+  const size = (node.attributes.size as number) ?? 1;
+  emitter.comment(`LRN — size=${size}, alpha=${alpha}, beta=${beta}, bias=${bias}`);
+  // Decompose: y = x / (bias + alpha/size * sum(x^2, local_window))^beta
+  const sq = `${output}_sq`;
+  const alphaConst = `${output}_alpha`;
+  const biasConst = `${output}_bias`;
+  const betaConst = `${output}_beta`;
+  emitter.line(`const ${sq} = builder.mul(${input}, ${input});`);
+  emitter.line(`const ${alphaConst} = builder.constant({dataType: 'float32', shape: []}, new Float32Array([${alpha / size}]));`);
+  emitter.line(`const ${biasConst} = builder.constant({dataType: 'float32', shape: []}, new Float32Array([${bias}]));`);
+  emitter.line(`const ${betaConst} = builder.constant({dataType: 'float32', shape: []}, new Float32Array([${beta}]));`);
+  // Use averagePool as a local sum approximation
+  const pooled = `${output}_pooled`;
+  emitter.line(`const ${pooled} = builder.averagePool2d(${sq}, { windowDimensions: [1, ${size}], autoPad: 'same-upper' });`);
+  const norm = `${output}_norm`;
+  emitter.line(`const ${norm} = builder.pow(builder.add(${biasConst}, builder.mul(${alphaConst}, ${pooled})), ${betaConst});`);
+  emitter.line(`const ${output} = builder.div(${input}, ${norm});`);
+}
+registerOnnxOp('LRN', emitLRN);
+
+// pool_op_builder.cc — GlobalLpPool
+function emitGlobalLpPool(node: NodeIR, emitter: CodeEmitter): void {
+  const input = emitter.ref(node.inputs[0]);
+  const output = emitter.declare(node.outputs[0]);
+  const p = (node.attributes.p as number) ?? 2;
+  emitter.comment(`GlobalLpPool (p=${p})`);
+  if (p === 2) {
+    emitter.line(`const ${output} = builder.l2Pool2d(${input});`);
+  } else {
+    // General case: (sum(|x|^p))^(1/p)
+    const abs = `${output}_abs`;
+    const pow = `${output}_pow`;
+    emitter.line(`const ${abs} = builder.abs(${input});`);
+    const pConst = `${output}_p`;
+    emitter.line(`const ${pConst} = builder.constant({dataType: 'float32', shape: []}, new Float32Array([${p}]));`);
+    emitter.line(`const ${pow} = builder.pow(${abs}, ${pConst});`);
+    const sum = `${output}_sum`;
+    emitter.line(`const ${sum} = builder.reduceSum(${pow}, { axes: [2, 3], keepDimensions: true });`);
+    const invP = `${output}_invp`;
+    emitter.line(`const ${invP} = builder.constant({dataType: 'float32', shape: []}, new Float32Array([${1 / p}]));`);
+    emitter.line(`const ${output} = builder.pow(${sum}, ${invP});`);
+  }
+}
+registerOnnxOp('GlobalLpPool', emitGlobalLpPool);

@@ -1,0 +1,44 @@
+{
+  "name": "model2webnn",
+  "version": "0.1.0",
+  "description": "Convert ML models (.onnx, .tflite) into ready-to-run WebNN API JavaScript/TypeScript code",
+  "type": "module",
+  "license": "Apache-2.0",
+  "bin": {
+    "model2webnn": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist/"
+  ],
+  "scripts": {
+    "dev": "vite --host",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "cli": "tsx src/cli.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "jszip": "^3.10.1",
+    "monaco-editor": "^0.52.2",
+    "onnx-proto": "^8.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@webnn/types": "^0.1.1",
+    "tsx": "^4.19.0",
+    "typescript": "~5.8.3",
+    "vite": "^6.3.5",
+    "vite-plugin-monaco-editor-esm": "^2.0.2",
+    "vitest": "^3.1.0"
+  }
+}

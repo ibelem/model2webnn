@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>model2webnn — Convert ML Models to WebNN Code</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300..700;1,9..40,300..700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <header>
+    <div class="header-left">
+      <h1>model2webnn</h1>
+      <p class="subtitle">Convert ML models to WebNN JavaScript code</p>
+    </div>
+    <div class="header-right" id="downloadSection" style="display:none">
+      <div class="download-row">
+        <button class="btn btn-primary btn-sm btn-download" id="downloadAllBtn">
+          <svg width="16" height="16" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M10 3v10m0 0l-3.5-3.5M10 13l3.5-3.5M4 16h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          All (.zip)
+        </button>
+        <button class="btn btn-ghost btn-sm btn-download" id="downloadJsBtn">.js</button>
+        <button class="btn btn-ghost btn-sm btn-download" id="downloadHtmlBtn">.html</button>
+        <button class="btn btn-ghost btn-sm btn-download" id="downloadWeightsBtn">.weights</button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <!-- Sidebar: Upload -->
+    <aside class="sidebar">
+      <section class="card card--upload" id="uploadCard">
+        <div class="card-header">
+          <span class="step-badge">1</span>
+          <h2>Load Model</h2>
+        </div>
+
+        <div class="upload-area" id="dropZone">
+          <div class="upload-icon">
+            <svg width="48" height="48" viewBox="0 0 48 48" fill="none" aria-hidden="true">
+              <rect x="8" y="12" width="32" height="28" rx="4" stroke="currentColor" stroke-width="2"/>
+              <path d="M24 20v12M18 26l6-6 6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </div>
+          <p class="upload-hint">Drop <strong>.onnx</strong> or <strong>.tflite</strong> here</p>
+          <div class="upload-actions">
+            <label class="btn btn-primary" for="fileInput">Browse Files</label>
+            <input type="file" id="fileInput" accept=".onnx,.tflite" hidden>
+            <label class="btn btn-ghost" for="folderInput">Folder</label>
+            <input type="file" id="folderInput" webkitdirectory hidden>
+          </div>
+          <div class="upload-divider"><span>or</span></div>
+          <div class="url-row">
+            <input type="text" id="modelUrl" class="input" placeholder="https://huggingface.co/.../model.onnx">
+            <button class="btn btn-primary btn-sm" id="fetchUrlBtn">Fetch</button>
+          </div>
+        </div>
+
+        <div id="uploadStatus" class="status-banner" style="display:none"></div>
+
+        <!-- External data prompt -->
+        <div id="externalDataSection" class="sub-card sub-card--warn" style="display:none">
+          <p class="sub-card-title">External data files required</p>
+          <ul id="externalDataList" class="tag-list"></ul>
+          <div class="upload-actions" style="margin-top:.75rem">
+            <label class="btn btn-primary btn-sm" for="externalDataInput">Upload Files</label>
+            <input type="file" id="externalDataInput" multiple hidden>
+          </div>
+          <div id="externalDataStatus" class="status-banner" style="display:none"></div>
+        </div>
+
+        <!-- Free dimension overrides -->
+        <div id="freeDimSection" class="sub-card sub-card--info" style="display:none">
+          <p class="sub-card-title">
+            <a href="https://webnn.io/en/learn/tutorials/onnx-runtime/free-dimension-overrides" rel="noopener">Free dimension overrides</a>
+          </p>
+          <p class="sub-card-desc">Set fixed values for symbolic (dynamic) dimensions.</p>
+          <div id="freeDimList" class="free-dim-grid"></div>
+        </div>
+      </section>
+    </aside>
+
+    <!-- Main content: Preview -->
+    <div class="content">
+      <!-- Coverage warning -->
+      <div id="coverageWarning" class="card card--warn" style="display:none">
+        <h3 class="warn-title">Unsupported Operations</h3>
+        <p class="warn-desc">These ops will produce placeholder stubs in the generated code:</p>
+        <ul id="unsupportedOpsList" class="tag-list"></ul>
+      </div>
+
+      <!-- Preview -->
+      <section class="card card--preview" id="previewSection" style="display:none">
+        <div class="card-header">
+          <span class="step-badge">2</span>
+          <h2>Preview Code</h2>
+          <span class="graph-info" id="graphInfo"></span>
+        </div>
+        <div class="tab-bar">
+          <button class="tab active" data-tab="js">JavaScript</button>
+          <button class="tab" data-tab="html">HTML</button>
+          <button class="tab" data-tab="manifest">Manifest</button>
+        </div>
+        <div id="editorContainer" class="editor-container"></div>
+      </section>
+
+      <!-- Empty state (shown when no model loaded yet) -->
+      <div class="empty-state" id="emptyState">
+        <p>Load a model to preview generated WebNN code</p>
+      </div>
+    </div>
+  </main>
+
+  <footer>
+    <span>&copy;2026 model2webnn</span>
+    <a href="https://www.w3.org/TR/webnn/" rel="noopener">WebNN API</a>
+    <span class="dot">&middot;</span>
+    <a href="https://ibelem.github.io/netron/" rel="noopener" id="netronLink">WebNN Netron</a>
+    <span class="dot">&middot;</span>
+    <a href="https://github.com/ibelem/model2webnn" rel="noopener" aria-label="GitHub">
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.63 7.63 0 0 1 4 0c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+    </a>
+  </footer>
+
+  <script type="module" src="./app.ts"></script>
+</body>
+</html>
