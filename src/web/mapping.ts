@@ -120,16 +120,26 @@ export function initMapping(result: ConvertResult): void {
 
   const graph = result.graph;
 
-  // Build a tensor info map for data types
+  // Build a tensor info map for data types and shapes
   const tensorTypes = new Map<string, string>();
-  for (const t of graph.inputs) tensorTypes.set(t.name, t.dataType);
-  for (const t of graph.outputs) tensorTypes.set(t.name, t.dataType);
-  for (const c of graph.constants) tensorTypes.set(c.name, c.dataType);
+  const tensorShapes = new Map<string, string>();
+  for (const t of graph.inputs) {
+    tensorTypes.set(t.name, t.dataType);
+    tensorShapes.set(t.name, formatShape(t.shape));
+  }
+  for (const t of graph.outputs) {
+    tensorTypes.set(t.name, t.dataType);
+    tensorShapes.set(t.name, formatShape(t.shape));
+  }
+  for (const c of graph.constants) {
+    tensorTypes.set(c.name, c.dataType);
+    tensorShapes.set(c.name, formatShape(c.shape));
+  }
 
   const fragment = document.createDocumentFragment();
 
   for (const node of graph.nodes) {
-    // Propagate output types FIRST so outputTypes lookup below can find them
+    // Propagate output types and shapes FIRST
     for (let i = 0; i < node.outputs.length; i++) {
       if (node.outputs[i] && !tensorTypes.has(node.outputs[i])) {
         const firstInputType = node.inputs.find((n) => n !== '' && tensorTypes.has(n));
@@ -149,6 +159,12 @@ export function initMapping(result: ConvertResult): void {
     const inputTypes = node.inputs.filter((n) => n !== '').map((n) => tensorTypes.get(n) ?? '?');
     const outputTypes = node.outputs.filter((n) => n !== '').map((n) => tensorTypes.get(n) ?? '?');
 
+    // Collect shapes for all inputs (source side)
+    const inputShapes = node.inputs.filter((n) => n !== '').map((n) => tensorShapes.get(n) ?? '');
+
+    // Extract layout-relevant WebNN attributes
+    const attrs = formatAttributes(node.attributes);
+
     const webnnOpClass = supported ? 'mapping-webnn-op' : 'mapping-unsupported';
     const webnnOpText = supported ? webnnOp : `\u26A0 ${node.opType} (unsupported)`;
 
@@ -156,10 +172,12 @@ export function initMapping(result: ConvertResult): void {
       <td><span class="mapping-op-name">${escapeHtml(node.opType)}</span></td>
       <td class="mapping-tensors" title="${escapeHtml(node.inputs.join(', '))}">${escapeHtml(inputNames.join(', '))}</td>
       <td class="mapping-tensors" title="${escapeHtml(node.outputs.join(', '))}">${escapeHtml(outputNames.join(', '))}</td>
+      <td class="mapping-shape">${inputShapes.filter(Boolean).map(escapeHtml).join('<br>')}</td>
       <td>${escapeHtml(uniqueTypes(inputTypes))}</td>
       <td><span class="${webnnOpClass}">${escapeHtml(webnnOpText)}</span></td>
       <td class="mapping-tensors" title="${escapeHtml(node.inputs.map(toJsVarName).join(', '))}">${escapeHtml(webnnInputNames.join(', '))}</td>
       <td class="mapping-tensors" title="${escapeHtml(node.outputs.map(toJsVarName).join(', '))}">${escapeHtml(webnnOutputNames.join(', '))}</td>
+      <td class="mapping-attrs">${attrs.map(escapeHtml).join('<br>')}</td>
       <td>${escapeHtml(uniqueTypes(outputTypes))}</td>
     `;
 
@@ -173,6 +191,35 @@ function getWebnnOpName(format: string, opType: string): string {
   if (format === 'onnx') return onnxToWebnn[opType] ?? opType.toLowerCase();
   if (format === 'tflite') return tfliteToWebnn[opType] ?? opType.toLowerCase();
   return opType;
+}
+
+function formatShape(shape: (number | string)[]): string {
+  if (!shape || shape.length === 0) return '';
+  return '[' + shape.join(', ') + ']';
+}
+
+// Layout & shape-relevant attributes to surface in the mapping table
+const DISPLAY_ATTRS = [
+  'inputLayout', 'filterLayout', 'layout',           // layout options
+  'axes', 'axis', 'perm',                             // axis info
+  'strides', 'dilations', 'pads', 'padding',          // conv/pool geometry
+  'kernelShape', 'kernel_shape',                       // kernel size
+  'group', 'groups',                                   // grouping
+  'alpha', 'beta', 'epsilon',                          // numeric params
+  'blockSize', 'block_size',                           // block ops
+  'mode',                                              // pad/resize mode
+];
+
+function formatAttributes(attrs: Record<string, unknown>): string[] {
+  const parts: string[] = [];
+  for (const key of DISPLAY_ATTRS) {
+    if (key in attrs && attrs[key] != null) {
+      const val = attrs[key];
+      const str = Array.isArray(val) ? '[' + val.join(', ') + ']' : String(val);
+      parts.push(`${key}: ${str}`);
+    }
+  }
+  return parts;
 }
 
 function uniqueTypes(types: string[]): string {

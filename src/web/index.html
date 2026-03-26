@@ -23,6 +23,7 @@
     </div>
     <div class="header-right" id="downloadSection" style="display:none">
       <div class="download-row">
+        <span class="graph-info" id="graphInfo"></span>
         <button class="btn btn-primary btn-sm btn-download" id="downloadAllBtn">
           <svg width="16" height="16" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M10 3v10m0 0l-3.5-3.5M10 13l3.5-3.5M4 16h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
           All (.zip)
@@ -37,14 +38,10 @@
   <main>
     <!-- Sidebar: Upload -->
     <aside class="sidebar">
-      <section class="card card--upload" id="uploadCard">
-        <div class="card-header">
-          <h2>Load Model</h2>
-        </div>
-
+      <section class="card--upload" id="uploadCard">
         <div class="upload-area" id="dropZone">
           <div class="upload-icon">
-            <svg width="48" height="48" viewBox="0 0 48 48" fill="none" aria-hidden="true">
+            <svg width="36" height="36" viewBox="0 0 48 48" fill="none" aria-hidden="true">
               <rect x="8" y="12" width="32" height="28" rx="4" stroke="currentColor" stroke-width="2"/>
               <path d="M24 20v12M18 26l6-6 6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
@@ -59,14 +56,14 @@
           <div class="upload-divider"><span>or</span></div>
           <div class="url-row">
             <input type="text" id="modelUrl" class="input" placeholder="https://huggingface.co/.../model.onnx">
-            <button class="btn btn-primary btn-sm" id="fetchUrlBtn">Fetch</button>
+            <button class="btn btn-primary" id="fetchUrlBtn">Fetch</button>
           </div>
         </div>
 
-        <div id="uploadStatus" class="status-banner" style="display:none"></div>
+        <div id="uploadStatus" class="left-section status-banner" style="display:none"></div>
 
         <!-- External data prompt -->
-        <div id="externalDataSection" class="sub-card sub-card--warn" style="display:none">
+        <div id="externalDataSection" class="left-section sub-card sub-card--warn" style="display:none">
           <p class="sub-card-title">External data files required</p>
           <ul id="externalDataList" class="tag-list"></ul>
           <div class="upload-actions" style="margin-top:.75rem">
@@ -77,7 +74,7 @@
         </div>
 
         <!-- Free dimension overrides -->
-        <div id="freeDimSection" class="sub-card sub-card--info" style="display:none">
+        <div id="freeDimSection" class="left-section sub-card sub-card--info" style="display:none">
           <p class="sub-card-title">
             <a href="https://webnn.io/en/learn/tutorials/onnx-runtime/free-dimension-overrides" rel="noopener">Free dimension overrides</a>
           </p>
@@ -98,22 +95,16 @@
 
       <!-- Preview -->
       <section class="card card--preview" id="previewSection" style="display:none">
-        <div class="card-header">
-          <h2>Preview Code</h2>
-          <span class="graph-info" id="graphInfo"></span>
-        </div>
         <div class="tab-bar">
           <div class="tab-group" data-label="Code">
             <button class="tab active" data-tab="js">JavaScript</button>
             <button class="tab" data-tab="html">HTML</button>
           </div>
-          <div class="tab-divider"></div>
           <div class="tab-group" data-label="Inspect">
             <button class="tab" data-tab="manifest">Manifest</button>
             <button class="tab" data-tab="reader">Weight Reader</button>
             <button class="tab" data-tab="mapping">Op Mapping</button>
           </div>
-          <div class="tab-divider"></div>
           <div class="tab-group" data-label="Run">
             <button class="tab" data-tab="preview">Preview</button>
           </div>
@@ -137,12 +128,12 @@
             <table class="mapping-table" id="mappingTable">
               <thead>
                 <tr>
-                  <th colspan="4" class="mapping-header-group mapping-header-onnx">Source Model Op</th>
-                  <th colspan="4" class="mapping-header-group mapping-header-webnn">WebNN Code</th>
+                  <th colspan="5" class="mapping-header-group mapping-header-onnx">Source Model Op</th>
+                  <th colspan="5" class="mapping-header-group mapping-header-webnn">WebNN Code</th>
                 </tr>
                 <tr>
-                  <th>Op</th><th>Inputs</th><th>Outputs</th><th>DataType</th>
-                  <th>WebNN Op</th><th>Inputs</th><th>Outputs</th><th>DataType</th>
+                  <th>Op</th><th>Inputs</th><th>Outputs</th><th>Shape</th><th>DataType</th>
+                  <th>WebNN Op</th><th>Inputs</th><th>Outputs</th><th>Attributes</th><th>DataType</th>
                 </tr>
               </thead>
               <tbody id="mappingBody"></tbody>
