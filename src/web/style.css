@@ -18,6 +18,7 @@
   --accent-glow: rgba(0, 47, 167, .18);
   --accent-light: rgba(0, 47, 167, .45);
   --accent-light-02: rgba(0, 47, 167, .2);
+  --green: #068906;
   --warn: #e8a838;
   --warn-bg: #fef8ec;
   --success: #3ec78a;
@@ -256,7 +257,8 @@ main {
   transition: transform .15s var(--ease-out), box-shadow .2s, background .2s;
 }
 .btn-ghost:hover:not(:disabled) {
-  background: rgba(0, 47, 167, .06);
+  background: var(--green);
+  color: white;
   box-shadow: 0 1px 4px rgba(0, 0, 0, .1);
 }
 .btn-ghost:active:not(:disabled) {
@@ -518,6 +520,10 @@ main {
 
 .btn-download {
   font-size: .82rem;
+}
+
+#downloadAllBtn {
+  background-color: var(--green);
 }
 
 /* --- Footer --- */
