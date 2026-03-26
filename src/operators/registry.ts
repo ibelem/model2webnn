@@ -20,6 +20,10 @@ export interface CodeEmitter {
   constantDataType(tensorName: string): string;
   // Get raw bytes of a constant tensor (for extracting inline values like padding)
   constantRawData(tensorName: string): Uint8Array | null;
+  // Extract integer values from a constant tensor (e.g. shape tensor for reshape)
+  constantIntValues(tensorName: string): number[] | null;
+  // Get the shape of any tensor (inputs, outputs, intermediates, constants)
+  tensorShape(tensorName: string): (number | string)[] | null;
 }
 
 export type OpEmitter = (node: NodeIR, emitter: CodeEmitter) => void;

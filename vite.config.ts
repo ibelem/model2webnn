@@ -1,8 +1,9 @@
 import { defineConfig } from 'vite';
 import { fileURLToPath, URL } from 'node:url';
+import basicSsl from '@vitejs/plugin-basic-ssl';
 
 export default defineConfig({
-  plugins: [],
+  plugins: [basicSsl()],
   base: '/model2webnn/',
   root: 'src/web',
   publicDir: '../../public',

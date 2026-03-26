@@ -267,6 +267,18 @@ export async function parseOnnx(
     };
   });
 
+  // Build shape map from graph inputs, outputs, constants, and value_info
+  const shapes = new Map<string, (number | string)[]>();
+  for (const inp of inputs) shapes.set(inp.name, inp.shape);
+  for (const out of outputs) shapes.set(out.name, out.shape);
+  for (const c of constants) shapes.set(c.name, c.shape);
+  for (const vi of graph.valueInfo ?? []) {
+    const name = vi.name ?? '';
+    if (name && !shapes.has(name)) {
+      shapes.set(name, extractShape(vi));
+    }
+  }
+
   return {
     name: graph.name || 'model',
     format: 'onnx',
@@ -274,5 +286,6 @@ export async function parseOnnx(
     outputs,
     constants,
     nodes,
+    shapes,
   };
 }

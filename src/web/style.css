@@ -340,7 +340,6 @@ main {
 .sub-card-desc {
   font-size: .82rem;
   color: var(--text-muted);
-  margin-bottom: .75rem;
 }
 
 /* --- Tag list (op coverage, external data) --- */
@@ -375,9 +374,9 @@ main {
 /* --- Free dimension grid --- */
 .free-dim-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-  gap: .35rem .5rem;
-  margin-top: .5rem;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: .25rem .25rem;
+  margin: 1rem 0 0.5rem 0;
 }
 
 .free-dim-row {
@@ -398,9 +397,9 @@ main {
 }
 
 .free-dim-row input {
-  width: 56px;
+  width: 46px;
   flex-shrink: 0;
-  padding: .25rem .35rem;
+  padding: .25rem .25rem;
   border: none;
   background: var(--bg);
   box-shadow: var(--shadow-inset);
@@ -522,11 +521,11 @@ main {
 }
 
 /* --- Footer --- */
-footer {
+footer div {
   display: flex;
   justify-content: center;
   align-items: center;
-  padding: 0rem 1rem 2rem 1rem;
+  padding: 0rem 1rem;
   font-size: .8rem;
   color: var(--text-faint);
 }
@@ -540,6 +539,19 @@ footer a {
 footer a:hover {
   color: var(--accent);
   transform: translateY(-1px);
+}
+.examples span {
+  margin-right: 0.5rem;
+}
+.examples a {
+  color: white;
+  padding: 0px 0.5rem;
+  background-color: rgba(255, 0, 129, 1);
+  border-radius: 3px;
+}
+.examples a:hover {
+  background-color: rgb(255, 0, 149);
+  color: white;
 }
 .dot { margin: 0 .35rem; }
 
@@ -596,7 +608,7 @@ footer a:hover {
 
 /* --- Panels (Weight Reader, Op Mapping, Preview) --- */
 .panel {
-  height: clamp(320px, 66vh, 700px);
+  height: clamp(420px, 76vh, 700px);
   overflow: hidden;
   box-shadow: var(--shadow-inset);
   animation: fadeSlideIn .3s var(--ease-out) both;
@@ -613,7 +625,12 @@ footer a:hover {
   background: var(--bg);
   border-right: 1px solid rgba(0, 0, 0, .06);
   padding: .5rem 0;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, .12) transparent;
 }
+.reader-sidebar::-webkit-scrollbar { width: 3px; }
+.reader-sidebar::-webkit-scrollbar-thumb { background: rgba(0, 0, 0, .12); border-radius: 3px; }
+.reader-sidebar::-webkit-scrollbar-track { background: transparent; }
 
 .reader-sidebar-item {
   display: block;
@@ -696,7 +713,12 @@ footer a:hover {
 /* Op Mapping */
 #mappingPanel {
   overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, .12) transparent;
 }
+#mappingPanel::-webkit-scrollbar { width: 3px; height: 3px; }
+#mappingPanel::-webkit-scrollbar-thumb { background: rgba(0, 0, 0, .12); border-radius: 3px; }
+#mappingPanel::-webkit-scrollbar-track { background: transparent; }
 
 .mapping-table-wrap {
   min-width: 100%;

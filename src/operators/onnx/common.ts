@@ -9,13 +9,19 @@ import { registerOnnxOp } from '../registry.js';
 // reshape_op_builder.cc
 function emitReshape(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
-  const shape = emitter.ref(node.inputs[1]);
   const output = emitter.declare(node.outputs[0]);
-  // If shape is a constant, we can inline it
+  // Shape input must be a constant initializer (per ORT validation)
   if (emitter.isConstant(node.inputs[1])) {
-    const shapeValues = emitter.constantShape(node.inputs[1]);
-    emitter.line(`const ${output} = builder.reshape(${input}, [${shapeValues.join(', ')}]);`);
+    const shapeValues = emitter.constantIntValues(node.inputs[1]);
+    if (shapeValues) {
+      emitter.line(`const ${output} = builder.reshape(${input}, [${shapeValues.join(', ')}]);`);
+    } else {
+      // Fallback: reference the constant operand directly
+      const shape = emitter.ref(node.inputs[1]);
+      emitter.line(`const ${output} = builder.reshape(${input}, ${shape});`);
+    }
   } else {
+    const shape = emitter.ref(node.inputs[1]);
     emitter.line(`const ${output} = builder.reshape(${input}, ${shape});`);
   }
 }
@@ -37,10 +43,25 @@ function emitFlatten(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
   const output = emitter.declare(node.outputs[0]);
   const axis = (node.attributes.axis as number) ?? 1;
-  // Flatten is reshape — but we need shape info at codegen time
-  // Emit as reshape with computed shape using flatten semantics
-  emitter.comment(`Flatten at axis=${axis}`);
-  emitter.line(`const ${output} = builder.reshape(${input}, [/* flatten at axis ${axis} */]);`);
+
+  const shape = emitter.tensorShape(node.inputs[0]);
+  if (shape && shape.length > 0) {
+    const rank = shape.length;
+    const effectiveAxis = axis < 0 ? axis + rank : axis;
+    const preDims = shape.slice(0, effectiveAxis);
+    const postDims = shape.slice(effectiveAxis);
+    // Compute products — treat dynamic (string) dims as 1 for inference
+    const preProduct = preDims.reduce<number>(
+      (a, d) => a * (typeof d === 'number' ? d : 1), 1,
+    );
+    const postProduct = postDims.reduce<number>(
+      (a, d) => a * (typeof d === 'number' ? d : 1), 1,
+    );
+    emitter.line(`const ${output} = builder.reshape(${input}, [${preProduct}, ${postProduct}]);`);
+  } else {
+    emitter.comment(`WARNING: Flatten without shape info, axis=${axis}`);
+    emitter.line(`const ${output} = builder.reshape(${input}, []); // TODO: provide shape for flatten`);
+  }
 }
 
 // squeeze_unsqueeze_op_builder.cc

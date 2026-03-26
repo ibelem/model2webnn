@@ -47,6 +47,19 @@ function ensureBlobUrls(): boolean {
 function runPreview(): void {
   if (!currentResult || !ensureBlobUrls()) return;
 
+  // Check for unresolved free dimensions
+  const freeDims = getUnresolvedFreeDims(currentResult);
+  if (freeDims.length > 0) {
+    const dimList = freeDims.join(', ');
+    const proceed = confirm(
+      `This model has unresolved dynamic dimensions: ${dimList}\n\n` +
+      `They will default to 1, which may cause errors.\n` +
+      `Set values in the "Free dimension overrides" section for correct results.\n\n` +
+      `Run anyway?`
+    );
+    if (!proceed) return;
+  }
+
   const iframe = document.getElementById('previewFrame') as HTMLIFrameElement;
   const statusEl = document.getElementById('previewStatus')!;
   const deviceSelect = document.getElementById('previewDevice') as HTMLSelectElement;
@@ -125,4 +138,15 @@ function runPreview(): void {
 
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Collect unique unresolved (string) dimension names from model inputs and outputs */
+function getUnresolvedFreeDims(result: ConvertResult): string[] {
+  const dims = new Set<string>();
+  for (const t of [...result.graph.inputs, ...result.graph.outputs]) {
+    for (const d of t.shape) {
+      if (typeof d === 'string') dims.add(d);
+    }
+  }
+  return [...dims];
 }

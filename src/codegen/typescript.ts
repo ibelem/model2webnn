@@ -38,14 +38,31 @@ declare const navigator: Navigator & {
 };
 
 interface MLContext {
-  compute(
-    graph: MLGraph,
-    inputs: Record<string, ArrayBufferView>,
-    outputs: Record<string, ArrayBufferView>,
-  ): Promise<{ outputs: Record<string, ArrayBufferView> }>;
+  createTensor(descriptor: MLTensorDescriptor): Promise<MLTensor>;
+  writeTensor(tensor: MLTensor, data: AllowSharedBufferSource): undefined;
+  readTensor(tensor: MLTensor): Promise<ArrayBuffer>;
+  dispatch(graph: MLGraph, inputs: Record<string, MLTensor>, outputs: Record<string, MLTensor>): undefined;
+  destroy(): undefined;
 }
 
-interface MLGraph {}
+interface MLTensorDescriptor extends MLOperandDescriptor {
+  readable?: boolean;
+  writable?: boolean;
+}
+
+interface MLTensor {
+  readonly dataType: string;
+  readonly shape: readonly number[];
+  readonly readable: boolean;
+  readonly writable: boolean;
+  destroy(): undefined;
+}
+
+type AllowSharedBufferSource = ArrayBufferView | ArrayBuffer;
+
+interface MLGraph {
+  destroy(): undefined;
+}
 
 interface MLGraphBuilder {
   input(name: string, descriptor: MLOperandDescriptor): MLOperand;

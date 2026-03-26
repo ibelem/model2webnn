@@ -60,21 +60,21 @@ export function generateHtml(
     .container { max-width: 900px; margin: 0 auto; }
     h1 { font-size: 1.5rem; margin-bottom: 0.5rem; }
     .subtitle { color: #666; margin-bottom: 1.5rem; font-size: 0.9rem; }
-    .card { background: #fff; border-radius: 8px; padding: 1.5rem; margin-bottom: 1rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+    .card { background: #fff; padding: 1.5rem; margin-bottom: 1rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
     .controls { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; }
     label { font-weight: 600; font-size: 0.9rem; }
-    select { padding: 0.5rem; border: 1px solid #ddd; border-radius: 4px; font-size: 0.9rem; }
-    button { background: #0066cc; color: #fff; border: none; padding: 0.6rem 1.5rem; border-radius: 4px; font-size: 0.9rem; cursor: pointer; }
-    button:hover { background: #0052a3; }
+    select { padding: 0.5rem; border: 1px solid #ddd; font-size: 0.9rem; }
+    button { background: rgba(0, 47, 167, 1); color: #fff; border: none; padding: 0.6rem 1.5rem; font-size: 0.9rem; cursor: pointer; }
+    button:hover { background: rgba(0, 47, 167, 1); }
     button:disabled { background: #ccc; cursor: not-allowed; }
-    .status { padding: 1rem; border-radius: 4px; margin-top: 1rem; font-size: 0.9rem; }
+    .status { padding: 1rem; margin-top: 1rem; font-size: 0.9rem; }
     .status.info { background: #e3f2fd; border-left: 3px solid #2196F3; }
     .status.success { background: #e8f5e9; border-left: 3px solid #4CAF50; }
     .status.error { background: #ffebee; border-left: 3px solid #f44336; }
     table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; font-size: 0.85rem; }
     th, td { text-align: left; padding: 0.5rem; border-bottom: 1px solid #eee; }
     th { color: #666; font-weight: 600; }
-    pre { background: #f5f5f5; padding: 1rem; border-radius: 4px; overflow-x: auto; font-size: 0.8rem; max-height: 200px; }
+    pre { margin-top: 1rem; background: #f5f5f5; padding: 1rem; overflow-x: auto; font-size: 0.8rem; max-height: 200px; }
   </style>
 </head>
 <body>
@@ -149,23 +149,38 @@ async function run() {
     statusEl.textContent = 'Building graph...';
     const graph = await buildGraph(context, weights);
 
-    // Create random inputs
+    // Create input tensors
     const inputs = {};
     for (const info of INPUT_INFO) {
-      const arr = new info.TypedArray(info.size);
-      for (let i = 0; i < arr.length; i++) arr[i] = Math.random() * 2 - 1;
-      inputs[info.name] = arr;
+      const data = new info.TypedArray(info.size);
+      for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+      const tensor = await context.createTensor({
+        dataType: info.dataType, shape: info.shape.map(d => typeof d === 'number' ? d : 1),
+        writable: true
+      });
+      context.writeTensor(tensor, data);
+      inputs[info.name] = tensor;
     }
 
-    // Create output buffers
+    // Create output tensors
     const outputs = {};
     for (const info of OUTPUT_INFO) {
-      outputs[info.name] = new info.TypedArray(info.size);
+      outputs[info.name] = await context.createTensor({
+        dataType: info.dataType, shape: info.shape.map(d => typeof d === 'number' ? d : 1),
+        readable: true
+      });
     }
 
     statusEl.textContent = 'Running inference...';
     const t0 = performance.now();
-    const results = await context.compute(graph, inputs, outputs);
+    context.dispatch(graph, inputs, outputs);
+
+    // Read results
+    const results = {};
+    for (const info of OUTPUT_INFO) {
+      const buf = await context.readTensor(outputs[info.name]);
+      results[info.name] = new info.TypedArray(buf);
+    }
     const elapsed = (performance.now() - t0).toFixed(2);
 
     statusEl.className = 'status success';
@@ -175,7 +190,7 @@ async function run() {
     resultsCard.style.display = '';
     let html = '';
     for (const info of OUTPUT_INFO) {
-      const data = results.outputs[info.name];
+      const data = results[info.name];
       const preview = Array.from(data.slice(0, 10)).map(v => typeof v === 'bigint' ? v.toString() : Number(v).toFixed(6)).join(', ');
       html += '<h4>' + info.name + ' ' + JSON.stringify(info.shape) + ' (' + info.dataType + ')</h4>';
       html += '<pre>[' + preview + (data.length > 10 ? ', ...' : '') + ']</pre>';

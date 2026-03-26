@@ -176,6 +176,25 @@ export function generateJavaScript(
       const c = constantMap.get(tensorName);
       return c ? c.rawData : null;
     },
+    constantIntValues(tensorName: string): number[] | null {
+      const c = constantMap.get(tensorName);
+      if (!c || !c.rawData || c.rawData.byteLength === 0) return null;
+      // Copy to aligned buffer to avoid typed array alignment issues
+      const aligned = new ArrayBuffer(c.rawData.byteLength);
+      new Uint8Array(aligned).set(c.rawData);
+      if (c.dataType === 'int64') {
+        const view = new BigInt64Array(aligned);
+        return Array.from(view, (v) => Number(v));
+      } else if (c.dataType === 'int32') {
+        return Array.from(new Int32Array(aligned));
+      } else if (c.dataType === 'uint32') {
+        return Array.from(new Uint32Array(aligned));
+      }
+      return null;
+    },
+    tensorShape(tensorName: string): (number | string)[] | null {
+      return graph.shapes?.get(tensorName) ?? null;
+    },
   };
 
   // --- Emit graph inputs ---
@@ -264,46 +283,59 @@ export function generateJavaScript(
   );
   emit('const graph = await buildGraph(context, weights);');
   emit('');
-  emit('// Prepare inputs');
+  emit('// Create input tensors');
   for (const input of graph.inputs) {
     const typedArray = getTypedArrayName(input.dataType);
     const numericShape = input.shape.map((d) => (typeof d === 'number' ? d : 1));
     const totalSize = numericShape.reduce((a, b) => a * b, 1);
     emit(
-      `const input_${toJsVarName(input.name)} = new ${typedArray}(${totalSize}); // shape: ${JSON.stringify(input.shape)}`,
+      `const inputData_${toJsVarName(input.name)} = new ${typedArray}(${totalSize}); // shape: ${JSON.stringify(input.shape)}`,
+    );
+    emit(
+      `const inputTensor_${toJsVarName(input.name)} = await context.createTensor({ dataType: '${input.dataType}', shape: ${JSON.stringify(numericShape)}, writable: true });`,
+    );
+    emit(
+      `context.writeTensor(inputTensor_${toJsVarName(input.name)}, inputData_${toJsVarName(input.name)});`,
     );
   }
   emit('');
-  emit('// Prepare output buffers');
+  emit('// Create output tensors');
   for (const output of graph.outputs) {
-    const typedArray = getTypedArrayName(output.dataType);
     const numericShape = output.shape.map((d) => (typeof d === 'number' ? d : 1));
-    const totalSize = numericShape.reduce((a, b) => a * b, 1);
     emit(
-      `const output_${toJsVarName(output.name)} = new ${typedArray}(${totalSize}); // shape: ${JSON.stringify(output.shape)}`,
+      `const outputTensor_${toJsVarName(output.name)} = await context.createTensor({ dataType: '${output.dataType}', shape: ${JSON.stringify(numericShape)}, readable: true });`,
     );
   }
   emit('');
   emit('const inputs = {};');
   for (const input of graph.inputs) {
-    emit(`inputs['${input.name}'] = input_${toJsVarName(input.name)};`);
+    emit(`inputs['${input.name}'] = inputTensor_${toJsVarName(input.name)};`);
   }
   emit('const outputs = {};');
   for (const output of graph.outputs) {
-    emit(`outputs['${output.name}'] = output_${toJsVarName(output.name)};`);
+    emit(`outputs['${output.name}'] = outputTensor_${toJsVarName(output.name)};`);
   }
   emit('');
   emit('const start = performance.now();');
-  emit('const results = await context.compute(graph, inputs, outputs);');
+  emit('context.dispatch(graph, inputs, outputs);');
+  emit('');
+  emit('// Read results');
+  for (const output of graph.outputs) {
+    const typedArray = getTypedArrayName(output.dataType);
+    emit(`const result_${toJsVarName(output.name)} = new ${typedArray}(await context.readTensor(outputTensor_${toJsVarName(output.name)}));`);
+  }
   emit("const elapsed = (performance.now() - start).toFixed(2);");
   emit('console.log(`Inference completed in ${elapsed}ms`);');
   emit('');
   emit('// Access results');
   for (const output of graph.outputs) {
-    emit(`console.log('${output.name}:', results.outputs['${output.name}']);`);
+    emit(`console.log('${output.name}:', result_${toJsVarName(output.name)});`);
   }
   emit('');
-  emit('return results;');
+  const returnEntries = graph.outputs.map(
+    (o) => `'${o.name}': result_${toJsVarName(o.name)}`
+  );
+  emit(`return { ${returnEntries.join(', ')} };`);
   indentLevel--;
   emit('}');
 
@@ -390,6 +422,22 @@ export function generateJavaScriptFixed(
     },
     constantDataType: (t: string) => constantMap.get(t)?.dataType ?? 'float32',
     constantRawData: (t: string) => constantMap.get(t)?.rawData ?? null,
+    constantIntValues(tensorName: string): number[] | null {
+      const c = constantMap.get(tensorName);
+      if (!c || !c.rawData || c.rawData.byteLength === 0) return null;
+      const aligned = new ArrayBuffer(c.rawData.byteLength);
+      new Uint8Array(aligned).set(c.rawData);
+      if (c.dataType === 'int64') {
+        const view = new BigInt64Array(aligned);
+        return Array.from(view, (v) => Number(v));
+      } else if (c.dataType === 'int32') {
+        return Array.from(new Int32Array(aligned));
+      } else if (c.dataType === 'uint32') {
+        return Array.from(new Uint32Array(aligned));
+      }
+      return null;
+    },
+    tensorShape: (t: string) => graph.shapes?.get(t) ?? null,
   };
 
   // --- Emit graph inputs ---
@@ -517,41 +565,53 @@ function emitMainFunction(
   emit(`const weights = await WeightsFile.load('${weightsFileName}', '${manifestFileName}');`);
   emit('const graph = await buildGraph(context, weights);');
   emit('');
-  emit('// Prepare inputs (fill with your data)');
+  emit('// Create input tensors');
   for (const input of graph.inputs) {
     const typedArray = getTypedArrayName(input.dataType);
     const numericShape = input.shape.map((d) => (typeof d === 'number' ? d : 1));
     const totalSize = numericShape.reduce((a, b) => a * b, 1);
-    emit(`const input_${toJsVarName(input.name)} = new ${typedArray}(${totalSize}); // ${JSON.stringify(input.shape)}`);
+    const vn = toJsVarName(input.name);
+    emit(`const inputData_${vn} = new ${typedArray}(${totalSize}); // ${JSON.stringify(input.shape)}`);
+    emit(`const inputTensor_${vn} = await context.createTensor({ dataType: '${input.dataType}', shape: ${JSON.stringify(numericShape)}, writable: true });`);
+    emit(`context.writeTensor(inputTensor_${vn}, inputData_${vn});`);
   }
   emit('');
-  emit('// Prepare output buffers');
+  emit('// Create output tensors');
   for (const output of graph.outputs) {
-    const typedArray = getTypedArrayName(output.dataType);
     const numericShape = output.shape.map((d) => (typeof d === 'number' ? d : 1));
-    const totalSize = numericShape.reduce((a, b) => a * b, 1);
-    emit(`const output_${toJsVarName(output.name)} = new ${typedArray}(${totalSize}); // ${JSON.stringify(output.shape)}`);
+    const vn = toJsVarName(output.name);
+    emit(`const outputTensor_${vn} = await context.createTensor({ dataType: '${output.dataType}', shape: ${JSON.stringify(numericShape)}, readable: true });`);
   }
   emit('');
   emit('const inputs = {');
   inc();
   for (const input of graph.inputs) {
-    emit(`'${escapeSingleQuotes(input.name)}': input_${toJsVarName(input.name)},`);
+    emit(`'${escapeSingleQuotes(input.name)}': inputTensor_${toJsVarName(input.name)},`);
   }
   dec();
   emit('};');
   emit('const outputs = {');
   inc();
   for (const output of graph.outputs) {
-    emit(`'${escapeSingleQuotes(output.name)}': output_${toJsVarName(output.name)},`);
+    emit(`'${escapeSingleQuotes(output.name)}': outputTensor_${toJsVarName(output.name)},`);
   }
   dec();
   emit('};');
   emit('');
   emit('const start = performance.now();');
-  emit('const results = await context.compute(graph, inputs, outputs);');
+  emit('context.dispatch(graph, inputs, outputs);');
+  emit('');
+  emit('// Read results');
+  for (const output of graph.outputs) {
+    const typedArray = getTypedArrayName(output.dataType);
+    const vn = toJsVarName(output.name);
+    emit(`const result_${vn} = new ${typedArray}(await context.readTensor(outputTensor_${vn}));`);
+  }
   emit("console.log(`Inference completed in ${(performance.now() - start).toFixed(2)}ms`);");
-  emit('return results;');
+  const returnEntries = graph.outputs.map(
+    (o) => `'${escapeSingleQuotes(o.name)}': result_${toJsVarName(o.name)}`
+  );
+  emit(`return { ${returnEntries.join(', ')} };`);
   dec();
   emit('}');
 }

@@ -8,6 +8,9 @@ export interface GraphIR {
   outputs: TensorInfo[];
   constants: ConstantInfo[];
   nodes: NodeIR[];
+  // Optional shape map for all tensors (inputs, outputs, intermediates)
+  // Populated from ONNX value_info, TFLite tensor table, etc.
+  shapes?: Map<string, (number | string)[]>;
 }
 
 export interface TensorInfo {
