@@ -103,11 +103,66 @@
           <span class="graph-info" id="graphInfo"></span>
         </div>
         <div class="tab-bar">
-          <button class="tab active" data-tab="js">JavaScript</button>
-          <button class="tab" data-tab="html">HTML</button>
-          <button class="tab" data-tab="manifest">Manifest</button>
+          <div class="tab-group" data-label="Code">
+            <button class="tab active" data-tab="js">JavaScript</button>
+            <button class="tab" data-tab="html">HTML</button>
+          </div>
+          <div class="tab-divider"></div>
+          <div class="tab-group" data-label="Inspect">
+            <button class="tab" data-tab="manifest">Manifest</button>
+            <button class="tab" data-tab="reader">Weight Reader</button>
+            <button class="tab" data-tab="mapping">Op Mapping</button>
+          </div>
+          <div class="tab-divider"></div>
+          <div class="tab-group" data-label="Run">
+            <button class="tab" data-tab="preview">Preview</button>
+          </div>
         </div>
         <div id="editorContainer" class="editor-container"></div>
+        <div id="readerPanel" class="panel" style="display:none">
+          <aside class="reader-sidebar" id="readerSidebar"></aside>
+          <div class="reader-content">
+            <div class="reader-pane">
+              <h4 class="reader-pane-title">Tensor Data</h4>
+              <div class="reader-string" id="readerString"></div>
+            </div>
+            <div class="reader-pane">
+              <h4 class="reader-pane-title">ArrayBuffer</h4>
+              <div class="reader-buffer" id="readerBuffer"></div>
+            </div>
+          </div>
+        </div>
+        <div id="mappingPanel" class="panel" style="display:none">
+          <div class="mapping-table-wrap">
+            <table class="mapping-table" id="mappingTable">
+              <thead>
+                <tr>
+                  <th colspan="4" class="mapping-header-group mapping-header-onnx">Source Model Op</th>
+                  <th colspan="4" class="mapping-header-group mapping-header-webnn">WebNN Code</th>
+                </tr>
+                <tr>
+                  <th>Op</th><th>Inputs</th><th>Outputs</th><th>DataType</th>
+                  <th>WebNN Op</th><th>Inputs</th><th>Outputs</th><th>DataType</th>
+                </tr>
+              </thead>
+              <tbody id="mappingBody"></tbody>
+            </table>
+          </div>
+        </div>
+        <div id="previewPanel" class="panel" style="display:none">
+          <div class="preview-toolbar">
+            <select id="previewDevice" class="input preview-device-select">
+              <option value="cpu">CPU</option>
+              <option value="gpu">GPU</option>
+              <option value="npu">NPU</option>
+            </select>
+            <button class="btn btn-primary btn-sm" id="previewRunBtn">▶ Run Inference</button>
+            <span class="preview-status" id="previewStatus"></span>
+          </div>
+          <!-- sandbox: allow-scripts + allow-same-origin is required for navigator.ml (WebNN API).
+               This combination can escape the sandbox, but is necessary for WebNN to function. -->
+          <iframe id="previewFrame" class="preview-iframe" sandbox="allow-scripts allow-same-origin"></iframe>
+        </div>
       </section>
 
       <!-- Empty state (shown when no model loaded yet) -->

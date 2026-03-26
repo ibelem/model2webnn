@@ -1,7 +1,11 @@
 // Preview module — Monaco editor for code preview with tab switching
+// Manages grouped tabs: Code (JS, HTML), Inspect (Manifest, Weight Reader, Op Mapping), Run (Preview)
 
 import type { ConvertResult } from '../index.js';
 import * as monaco from 'monaco-editor';
+import { initReader } from './reader.js';
+import { initMapping } from './mapping.js';
+import { initRunner } from './runner.js';
 
 import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
 import jsonWorker from 'monaco-editor/esm/vs/language/json/json.worker?worker';
@@ -21,6 +25,14 @@ self.MonacoEnvironment = {
 
 let editor: monaco.editor.IStandaloneCodeEditor | null = null;
 let currentResult: ConvertResult | null = null;
+
+// Tabs that use the Monaco editor vs custom panels
+const editorTabs = new Set(['js', 'html', 'manifest']);
+const panelIds: Record<string, string> = {
+  reader: 'readerPanel',
+  mapping: 'mappingPanel',
+  preview: 'previewPanel',
+};
 
 export function initPreview(result: ConvertResult): void {
   currentResult = result;
@@ -45,18 +57,61 @@ export function initPreview(result: ConvertResult): void {
     monaco.editor.setModelLanguage(editor.getModel()!, 'javascript');
   }
 
-  // Tab switching
-  const tabs = document.querySelectorAll<HTMLElement>('.tab');
-  tabs.forEach((tab) => {
-    tab.addEventListener('click', () => {
-      tabs.forEach((t) => t.classList.remove('active'));
-      tab.classList.add('active');
-      switchTab(tab.dataset.tab ?? 'js');
-    });
+  // Reset to JS tab — reset both panel visibility and tab button active states
+  const allTabs = document.querySelectorAll('.tab-bar .tab');
+  allTabs.forEach((t) => t.classList.remove('active'));
+  const jsTab = document.querySelector('.tab-bar .tab[data-tab="js"]');
+  if (jsTab) jsTab.classList.add('active');
+  showPanel('js');
+
+  // Initialize sub-modules
+  initReader(result);
+  initMapping(result);
+  initRunner(result);
+
+  // Tab switching — use event delegation on the tab bar
+  const tabBar = document.querySelector('.tab-bar')!;
+  // Remove old listener by cloning
+  const newTabBar = tabBar.cloneNode(true) as HTMLElement;
+  tabBar.parentNode!.replaceChild(newTabBar, tabBar);
+
+  newTabBar.addEventListener('click', (e) => {
+    const target = (e.target as HTMLElement).closest('.tab') as HTMLElement | null;
+    if (!target) return;
+    const tab = target.dataset.tab;
+    if (!tab) return;
+
+    // Update active states
+    newTabBar.querySelectorAll('.tab').forEach((t) => t.classList.remove('active'));
+    target.classList.add('active');
+
+    showPanel(tab);
   });
 }
 
-function switchTab(tab: string): void {
+function showPanel(tab: string): void {
+  const editorContainer = document.getElementById('editorContainer')!;
+
+  // Hide all custom panels
+  for (const id of Object.values(panelIds)) {
+    document.getElementById(id)!.style.display = 'none';
+  }
+
+  if (editorTabs.has(tab)) {
+    // Show Monaco editor
+    editorContainer.style.display = '';
+    switchEditorContent(tab);
+  } else {
+    // Hide Monaco, show the custom panel
+    editorContainer.style.display = 'none';
+    const panelId = panelIds[tab];
+    if (panelId) {
+      document.getElementById(panelId)!.style.display = '';
+    }
+  }
+}
+
+function switchEditorContent(tab: string): void {
   if (!editor || !currentResult) return;
 
   switch (tab) {
