@@ -249,7 +249,7 @@ Create a new file in `src/codegen/` that accepts `GraphIR` and returns a string.
 
 ## Browser compatibility
 
-WebNN requires Chrome 131+ with the following flags enabled:
+WebNN requires Chrome 147+ with the following flags enabled:
 
 - `chrome://flags/#web-machine-learning-neural-network` → Enabled
 - Device support: CPU, GPU, NPU (via `MLDeviceType`)

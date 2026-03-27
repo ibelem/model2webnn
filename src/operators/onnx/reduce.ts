@@ -24,13 +24,27 @@ function emitReduce(node: NodeIR, emitter: CodeEmitter): void {
   const webnnOp = onnxToWebnn[node.opType] ?? 'reduceMean';
 
   const keepdims = (node.attributes.keepdims as number) ?? 1;
-  const axes = node.attributes.axes as number[] | undefined;
+
+  // Axes from attribute (opset <18) or second input constant (opset 18+ / ReduceSum opset 13+)
+  let axes = node.attributes.axes as number[] | undefined;
+  if (!axes && node.inputs.length > 1 && node.inputs[1] !== '' && emitter.isConstant(node.inputs[1])) {
+    const axesValues = emitter.constantIntValues(node.inputs[1]);
+    if (axesValues && axesValues.length > 0) {
+      // Resolve negative axes
+      const inputShape = emitter.tensorShape(node.inputs[0]);
+      const rank = inputShape ? inputShape.length : 0;
+      axes = axesValues.map((a) => (a < 0 && rank > 0 ? a + rank : a));
+    }
+  }
+
+  const noopWithEmptyAxes = (node.attributes.noop_with_empty_axes as number) ?? 0;
 
   const opts: string[] = [];
-  if (axes) {
+  if (axes && axes.length > 0) {
     opts.push(`axes: [${axes.join(', ')}]`);
-  } else if (node.inputs.length > 1 && node.inputs[1] !== '') {
-    // ONNX opset 18+: axes as second input (handled at code level)
+  } else if (noopWithEmptyAxes) {
+    // noop_with_empty_axes=1: pass empty axes array (no reduction, but other ops still run)
+    opts.push(`axes: []`);
   }
   if (!keepdims) {
     opts.push(`keepDimensions: false`);

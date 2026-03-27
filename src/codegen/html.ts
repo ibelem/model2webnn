@@ -137,7 +137,7 @@ async function run() {
     statusEl.textContent = 'Checking WebNN support...';
 
     if (!navigator.ml) {
-      throw new Error('WebNN is not supported in this browser. Try Chrome 131+ with WebNN flags enabled.');
+      throw new Error('WebNN is not supported in this browser. Try Chrome 147+ with WebNN flags enabled.');
     }
 
     statusEl.textContent = 'Creating context (' + deviceType + ')...';

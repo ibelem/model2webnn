@@ -21,14 +21,92 @@ function emitResize(node: NodeIR, emitter: CodeEmitter): void {
     opts.push(`mode: 'nearest-neighbor'`);
   }
 
-  // scales input (index 2) or sizes input (index 3)
-  const hasScales = node.inputs.length > 2 && node.inputs[2] !== '';
-  const hasSizes = node.inputs.length > 3 && node.inputs[3] !== '';
+  // Helper: check if input is an empty placeholder tensor (shape [0])
+  const isEmpty = (idx: number) =>
+    node.inputs.length <= idx || node.inputs[idx] === '' ||
+    (emitter.isConstant(node.inputs[idx]) && emitter.constantShape(node.inputs[idx]).some(d => d === 0));
+
+  const hasScales = !isEmpty(2);
+  const hasSizes = !isEmpty(3);
+
+  // Resolve axes — opset 18+ may specify axes attribute
+  const axesAttr = node.attributes.axes as number[] | undefined;
 
   if (hasSizes) {
-    opts.push(`sizes: ${emitter.ref(node.inputs[3])}`);
+    // ORT reads sizes from constant initializer and extracts spatial dims only.
+    // WebNN resample2d expects sizes as a JS array of [height, width].
+    if (emitter.isConstant(node.inputs[3])) {
+      const sizesValues = emitter.constantIntValues(node.inputs[3]);
+      if (sizesValues) {
+        if (axesAttr && axesAttr.length === 2) {
+          // Opset 18+: sizes already contains 2 spatial values
+          opts.push(`sizes: [${sizesValues.join(', ')}]`);
+          opts.push(`axes: [${axesAttr.join(', ')}]`);
+        } else if (sizesValues.length === 4) {
+          // Opset 11-17: sizes has 4 elements [N, C, H, W], extract spatial dims
+          opts.push(`sizes: [${sizesValues[2]}, ${sizesValues[3]}]`);
+          opts.push(`axes: [2, 3]`);
+        } else {
+          opts.push(`sizes: [${sizesValues.join(', ')}]`);
+        }
+      } else {
+        opts.push(`sizes: ${emitter.ref(node.inputs[3])}`);
+      }
+    } else {
+      // Sizes is computed dynamically (e.g., from Shape → Slice → Concat chain).
+      // Try to trace through a Concat node to find the constant spatial dims.
+      let resolved = false;
+      const producer = emitter.findProducerNode(node.inputs[3]);
+      if (producer && producer.opType === 'Concat') {
+        // Common pattern: Concat([shape[:2], [target_h, target_w]])
+        // The last input to Concat is typically the constant spatial dims
+        for (let i = producer.inputs.length - 1; i >= 0; i--) {
+          if (emitter.isConstant(producer.inputs[i])) {
+            const spatialValues = emitter.constantIntValues(producer.inputs[i]);
+            if (spatialValues && spatialValues.length === 2) {
+              opts.push(`sizes: [${spatialValues.join(', ')}]`);
+              opts.push(`axes: [2, 3]`);
+              resolved = true;
+              break;
+            }
+          }
+        }
+      }
+      if (!resolved) {
+        // Fallback: try output shape
+        const outputShape = emitter.tensorShape(node.outputs[0]);
+        if (outputShape && outputShape.length === 4 &&
+            typeof outputShape[2] === 'number' && typeof outputShape[3] === 'number') {
+          opts.push(`sizes: [${outputShape[2]}, ${outputShape[3]}]`);
+          opts.push(`axes: [2, 3]`);
+        } else {
+          emitter.comment(`WARNING: Resize sizes is dynamic and could not be resolved`);
+          opts.push(`sizes: ${emitter.ref(node.inputs[3])}`);
+        }
+      }
+    }
   } else if (hasScales) {
-    opts.push(`scales: ${emitter.ref(node.inputs[2])}`);
+    if (emitter.isConstant(node.inputs[2])) {
+      const scalesRaw = emitter.constantRawData(node.inputs[2]);
+      if (scalesRaw && scalesRaw.byteLength > 0) {
+        const aligned = new ArrayBuffer(scalesRaw.byteLength);
+        new Uint8Array(aligned).set(scalesRaw);
+        const scalesValues = Array.from(new Float32Array(aligned));
+        if (axesAttr && axesAttr.length === 2) {
+          opts.push(`scales: [${scalesValues.join(', ')}]`);
+          opts.push(`axes: [${axesAttr.join(', ')}]`);
+        } else if (scalesValues.length === 4) {
+          opts.push(`scales: [${scalesValues[2]}, ${scalesValues[3]}]`);
+          opts.push(`axes: [2, 3]`);
+        } else {
+          opts.push(`scales: [${scalesValues.join(', ')}]`);
+        }
+      } else {
+        opts.push(`scales: ${emitter.ref(node.inputs[2])}`);
+      }
+    } else {
+      opts.push(`scales: ${emitter.ref(node.inputs[2])}`);
+    }
   }
 
   const coordinateTransformMode = node.attributes.coordinate_transformation_mode as string | undefined;

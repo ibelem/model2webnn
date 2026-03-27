@@ -7,14 +7,68 @@ import type { CodeEmitter } from '../registry.js';
 import { registerOnnxOp } from '../registry.js';
 
 // reshape_op_builder.cc
+// ORT resolves ONNX special values (-1 = infer, 0 = copy from input) via ReshapeHelper
+// before passing uint32 shape to WebNN, which only accepts unsigned long values.
+function resolveReshapeShape(
+  targetShape: number[],
+  inputShape: (number | string)[] | null,
+  allowZero: number,
+): number[] | null {
+  const resolved = [...targetShape];
+  const inputDims = inputShape && inputShape.every((d) => typeof d === 'number')
+    ? (inputShape as number[])
+    : null;
+
+  // Replace 0 with corresponding input dim (when allowzero=0, the default)
+  if (!allowZero && inputDims) {
+    for (let i = 0; i < resolved.length; i++) {
+      if (resolved[i] === 0 && i < inputDims.length) {
+        resolved[i] = inputDims[i];
+      }
+    }
+  }
+
+  // Resolve -1: compute from total element count
+  const inferIdx = resolved.indexOf(-1);
+  if (inferIdx !== -1 && inputDims) {
+    const totalInput = inputDims.reduce((a, b) => a * b, 1);
+    const knownProduct = resolved.reduce((a, b, i) => (i === inferIdx ? a : a * b), 1);
+    if (knownProduct > 0) {
+      resolved[inferIdx] = totalInput / knownProduct;
+    } else {
+      return null; // cannot resolve
+    }
+  } else if (inferIdx !== -1) {
+    return null; // cannot resolve without input shape
+  }
+
+  // Verify all values are non-negative integers
+  if (resolved.some((d) => d < 0 || !Number.isInteger(d))) return null;
+  return resolved;
+}
+
 function emitReshape(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
   const output = emitter.declare(node.outputs[0]);
+  const allowZero = (node.attributes.allowzero as number) ?? 0;
   // Shape input must be a constant initializer (per ORT validation)
   if (emitter.isConstant(node.inputs[1])) {
     const shapeValues = emitter.constantIntValues(node.inputs[1]);
     if (shapeValues) {
-      emitter.line(`const ${output} = builder.reshape(${input}, [${shapeValues.join(', ')}]);`);
+      const inputShape = emitter.tensorShape(node.inputs[0]);
+      const resolved = resolveReshapeShape(shapeValues, inputShape, allowZero);
+      if (resolved) {
+        emitter.line(`const ${output} = builder.reshape(${input}, [${resolved.join(', ')}]);`);
+      } else {
+        // Fallback: if output shape is known and fully static, use it directly
+        const outputShape = emitter.tensorShape(node.outputs[0]);
+        if (outputShape && outputShape.every((d) => typeof d === 'number' && d >= 0)) {
+          emitter.line(`const ${output} = builder.reshape(${input}, [${outputShape.join(', ')}]);`);
+        } else {
+          emitter.comment(`WARNING: Could not resolve reshape shape [${shapeValues.join(', ')}] — input shape unknown`);
+          emitter.line(`const ${output} = builder.reshape(${input}, [${shapeValues.join(', ')}]);`);
+        }
+      }
     } else {
       // Fallback: reference the constant operand directly
       const shape = emitter.ref(node.inputs[1]);
@@ -65,15 +119,22 @@ function emitFlatten(node: NodeIR, emitter: CodeEmitter): void {
 }
 
 // squeeze_unsqueeze_op_builder.cc
+// ORT reads axes from attribute (opset <13) or constant initializer (opset 13+),
+// resolves negative indices, then uses reshape to implement squeeze/unsqueeze.
 function emitSqueeze(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
   const output = emitter.declare(node.outputs[0]);
-  const axes = node.attributes.axes as number[] | undefined;
+  let axes = node.attributes.axes as number[] | undefined;
+  // Opset 13+: axes as second input constant
+  if (!axes && node.inputs.length > 1 && node.inputs[1] !== '' && emitter.isConstant(node.inputs[1])) {
+    axes = emitter.constantIntValues(node.inputs[1]) ?? undefined;
+  }
   if (axes) {
-    emitter.line(`const ${output} = builder.squeeze(${input}, { axes: [${axes.join(', ')}] });`);
-  } else if (node.inputs.length > 1 && node.inputs[1] !== '') {
-    // ONNX opset 13+: axes as second input
-    emitter.line(`const ${output} = builder.squeeze(${input});`);
+    // Resolve negative axes
+    const inputShape = emitter.tensorShape(node.inputs[0]);
+    const rank = inputShape ? inputShape.length : 0;
+    const resolved = axes.map((a) => (a < 0 && rank > 0 ? a + rank : a));
+    emitter.line(`const ${output} = builder.squeeze(${input}, { axes: [${resolved.join(', ')}] });`);
   } else {
     emitter.line(`const ${output} = builder.squeeze(${input});`);
   }
@@ -82,9 +143,17 @@ function emitSqueeze(node: NodeIR, emitter: CodeEmitter): void {
 function emitUnsqueeze(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
   const output = emitter.declare(node.outputs[0]);
-  const axes = node.attributes.axes as number[] | undefined;
+  let axes = node.attributes.axes as number[] | undefined;
+  // Opset 13+: axes as second input constant
+  if (!axes && node.inputs.length > 1 && node.inputs[1] !== '' && emitter.isConstant(node.inputs[1])) {
+    axes = emitter.constantIntValues(node.inputs[1]) ?? undefined;
+  }
   if (axes) {
-    emitter.line(`const ${output} = builder.unsqueeze(${input}, { axes: [${axes.join(', ')}] });`);
+    // For Unsqueeze, resolve against expanded rank
+    const inputShape = emitter.tensorShape(node.inputs[0]);
+    const expandedRank = (inputShape ? inputShape.length : 0) + axes.length;
+    const resolved = axes.map((a) => (a < 0 ? a + expandedRank : a));
+    emitter.line(`const ${output} = builder.unsqueeze(${input}, { axes: [${resolved.join(', ')}] });`);
   } else {
     emitter.line(`const ${output} = builder.unsqueeze(${input});`);
   }
@@ -92,6 +161,13 @@ function emitUnsqueeze(node: NodeIR, emitter: CodeEmitter): void {
 
 // concat_op_builder.cc
 function emitConcat(node: NodeIR, emitter: CodeEmitter): void {
+  // Propagate dead state: if any input is dead, skip
+  if (node.inputs.some((name) => emitter.isDead(name))) {
+    emitter.comment(`Concat skipped: has dead input(s)`);
+    emitter.markDead(node.outputs[0]);
+    return;
+  }
+
   const inputs = node.inputs.map((name) => emitter.ref(name));
   const output = emitter.declare(node.outputs[0]);
   const axis = (node.attributes.axis as number) ?? 0;
@@ -99,52 +175,118 @@ function emitConcat(node: NodeIR, emitter: CodeEmitter): void {
 }
 
 // split_op_builder.cc
+// ORT reads split sizes from attribute (opset <13) or constant initializer (opset 13+).
 function emitSplit(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
   const axis = (node.attributes.axis as number) ?? 0;
-  const split = node.attributes.split as number[] | undefined;
   const numOutputs = node.outputs.length;
 
+  // Try attribute first, then second input constant (opset 13+)
+  let split = node.attributes.split as number[] | undefined;
+  if (!split && node.inputs.length > 1 && node.inputs[1] !== '' && emitter.isConstant(node.inputs[1])) {
+    split = emitter.constantIntValues(node.inputs[1]) ?? undefined;
+  }
+
+  const splitVar = emitter.declare(`${node.outputs[0]}_splits`);
   if (split) {
-    const splitVar = emitter.declare(`${node.outputs[0]}_splits`);
     emitter.line(`const ${splitVar} = builder.split(${input}, [${split.join(', ')}], { axis: ${axis} });`);
-    for (let i = 0; i < numOutputs; i++) {
-      const out = emitter.declare(node.outputs[i]);
-      emitter.line(`const ${out} = ${splitVar}[${i}];`);
-    }
   } else {
-    const splitVar = emitter.declare(`${node.outputs[0]}_splits`);
     emitter.line(`const ${splitVar} = builder.split(${input}, ${numOutputs}, { axis: ${axis} });`);
-    for (let i = 0; i < numOutputs; i++) {
-      const out = emitter.declare(node.outputs[i]);
-      emitter.line(`const ${out} = ${splitVar}[${i}];`);
-    }
+  }
+  for (let i = 0; i < numOutputs; i++) {
+    const out = emitter.declare(node.outputs[i]);
+    emitter.line(`const ${out} = ${splitVar}[${i}];`);
   }
 }
 
 // slice_op_builder.cc
+// ORT reads starts/ends/axes/steps from constant initializers and resolves them to
+// JavaScript arrays for WebNN's builder.slice(input, starts, sizes, { strides }).
 function emitSlice(node: NodeIR, emitter: CodeEmitter): void {
+  // Propagate dead state: if data input is dead, skip
+  if (emitter.isDead(node.inputs[0])) {
+    emitter.comment(`Slice skipped: input ${node.inputs[0]} is dead`);
+    emitter.markDead(node.outputs[0]);
+    return;
+  }
+
   const input = emitter.ref(node.inputs[0]);
-  const starts = emitter.ref(node.inputs[1]);
-  const ends = emitter.ref(node.inputs[2]);
   const output = emitter.declare(node.outputs[0]);
-  const hasAxes = node.inputs.length > 3 && node.inputs[3] !== '';
-  const hasSteps = node.inputs.length > 4 && node.inputs[4] !== '';
+  const inputShape = emitter.tensorShape(node.inputs[0]);
+  const rank = inputShape ? inputShape.length : 0;
 
-  const opts: string[] = [];
-  if (hasAxes) opts.push(`axes: ${emitter.ref(node.inputs[3])}`);
-  if (hasSteps) opts.push(`strides: ${emitter.ref(node.inputs[4])}`);
+  // Extract constant integer values for starts, ends, axes, steps
+  const startsRaw = emitter.isConstant(node.inputs[1]) ? emitter.constantIntValues(node.inputs[1]) : null;
+  const endsRaw = emitter.isConstant(node.inputs[2]) ? emitter.constantIntValues(node.inputs[2]) : null;
+  const axesRaw = node.inputs.length > 3 && node.inputs[3] !== '' && emitter.isConstant(node.inputs[3])
+    ? emitter.constantIntValues(node.inputs[3]) : null;
+  const stepsRaw = node.inputs.length > 4 && node.inputs[4] !== '' && emitter.isConstant(node.inputs[4])
+    ? emitter.constantIntValues(node.inputs[4]) : null;
 
-  const optsStr = opts.length > 0 ? `, { ${opts.join(', ')} }` : '';
-  emitter.line(`const ${output} = builder.slice(${input}, ${starts}, ${ends}${optsStr});`);
+  if (startsRaw && endsRaw && inputShape && inputShape.every((d) => typeof d === 'number')) {
+    const shape = inputShape as number[];
+    const n = startsRaw.length;
+
+    // Determine axes (default: [0, 1, ..., n-1])
+    const axes = axesRaw ? axesRaw.map((a) => (a < 0 ? a + rank : a)) : Array.from({ length: n }, (_, i) => i);
+    const steps = stepsRaw ?? new Array(n).fill(1);
+
+    // Build per-axis starts/sizes/strides arrays (full rank)
+    const resolvedStarts = new Array(rank).fill(0);
+    const resolvedSizes = shape.slice();
+    const resolvedStrides = new Array(rank).fill(1);
+
+    for (let i = 0; i < n; i++) {
+      const ax = axes[i];
+      const dimSize = shape[ax];
+      const step = steps[i];
+      // Clamp start/end per ONNX spec
+      let s = startsRaw[i];
+      let e = endsRaw[i];
+      if (s < 0) s = Math.max(0, s + dimSize);
+      if (e < 0) e = Math.max(0, e + dimSize);
+      s = Math.min(s, dimSize);
+      e = Math.min(e, dimSize);
+      // Compute size = ceil((end - start) / step)
+      const size = Math.max(0, Math.ceil((e - s) / step));
+      resolvedStarts[ax] = s;
+      resolvedSizes[ax] = size;
+      resolvedStrides[ax] = step;
+    }
+
+    const hasStrides = resolvedStrides.some((s) => s !== 1);
+    const stridesOpt = hasStrides ? `, { strides: [${resolvedStrides.join(', ')}] }` : '';
+    emitter.line(`const ${output} = builder.slice(${input}, [${resolvedStarts.join(', ')}], [${resolvedSizes.join(', ')}]${stridesOpt});`);
+  } else {
+    // Fallback: emit with refs (may fail at runtime if not arrays)
+    const starts = emitter.ref(node.inputs[1]);
+    const ends = emitter.ref(node.inputs[2]);
+    emitter.comment(`WARNING: Slice inputs not fully resolved as constants`);
+    emitter.line(`const ${output} = builder.slice(${input}, ${starts}, ${ends});`);
+  }
 }
 
 // expand_op_builder.cc
+// ORT reads shape from constant initializer, converts int64→uint32, passes JS array.
 function emitExpand(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
-  const shape = emitter.ref(node.inputs[1]);
   const output = emitter.declare(node.outputs[0]);
-  emitter.line(`const ${output} = builder.expand(${input}, ${shape});`);
+  if (emitter.isConstant(node.inputs[1])) {
+    const shapeValues = emitter.constantIntValues(node.inputs[1]);
+    if (shapeValues) {
+      emitter.line(`const ${output} = builder.expand(${input}, [${shapeValues.join(', ')}]);`);
+      return;
+    }
+  }
+  // Fallback: try output shape
+  const outputShape = emitter.tensorShape(node.outputs[0]);
+  if (outputShape && outputShape.every((d) => typeof d === 'number')) {
+    emitter.line(`const ${output} = builder.expand(${input}, [${outputShape.join(', ')}]);`);
+  } else {
+    emitter.comment(`WARNING: Expand shape not resolved as constant`);
+    const shape = emitter.ref(node.inputs[1]);
+    emitter.line(`const ${output} = builder.expand(${input}, ${shape});`);
+  }
 }
 
 // gather_op_builder.cc
@@ -198,14 +340,25 @@ function emitPad(node: NodeIR, emitter: CodeEmitter): void {
 }
 
 // tile_op_builder.cc
+// ORT reads repetitions from constant initializer, converts int64→uint32, passes JS array.
 function emitTile(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
-  const repeats = emitter.ref(node.inputs[1]);
   const output = emitter.declare(node.outputs[0]);
+  if (emitter.isConstant(node.inputs[1])) {
+    const repsValues = emitter.constantIntValues(node.inputs[1]);
+    if (repsValues) {
+      emitter.line(`const ${output} = builder.tile(${input}, [${repsValues.join(', ')}]);`);
+      return;
+    }
+  }
+  emitter.comment(`WARNING: Tile repetitions not resolved as constant`);
+  const repeats = emitter.ref(node.inputs[1]);
   emitter.line(`const ${output} = builder.tile(${input}, ${repeats});`);
 }
 
 // clip_op_builder.cc → clamp
+// ORT extracts scalar float values for min/max via GetClipMinMax.
+// WebNN clamp expects MLNumber (scalar), not MLOperand.
 function emitClip(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
   const output = emitter.declare(node.outputs[0]);
@@ -214,8 +367,36 @@ function emitClip(node: NodeIR, emitter: CodeEmitter): void {
   const hasMax = node.inputs.length > 2 && node.inputs[2] !== '';
 
   const opts: string[] = [];
-  if (hasMin) opts.push(`minValue: ${emitter.ref(node.inputs[1])}`);
-  if (hasMax) opts.push(`maxValue: ${emitter.ref(node.inputs[2])}`);
+  if (hasMin) {
+    if (emitter.isConstant(node.inputs[1])) {
+      const raw = emitter.constantRawData(node.inputs[1]);
+      if (raw && raw.byteLength >= 4) {
+        const aligned = new ArrayBuffer(raw.byteLength);
+        new Uint8Array(aligned).set(raw);
+        const val = new Float32Array(aligned)[0];
+        opts.push(`minValue: ${val}`);
+      } else {
+        opts.push(`minValue: ${emitter.ref(node.inputs[1])}`);
+      }
+    } else {
+      opts.push(`minValue: ${emitter.ref(node.inputs[1])}`);
+    }
+  }
+  if (hasMax) {
+    if (emitter.isConstant(node.inputs[2])) {
+      const raw = emitter.constantRawData(node.inputs[2]);
+      if (raw && raw.byteLength >= 4) {
+        const aligned = new ArrayBuffer(raw.byteLength);
+        new Uint8Array(aligned).set(raw);
+        const val = new Float32Array(aligned)[0];
+        opts.push(`maxValue: ${val}`);
+      } else {
+        opts.push(`maxValue: ${emitter.ref(node.inputs[2])}`);
+      }
+    } else {
+      opts.push(`maxValue: ${emitter.ref(node.inputs[2])}`);
+    }
+  }
 
   const optsStr = opts.length > 0 ? `, { ${opts.join(', ')} }` : '';
   emitter.line(`const ${output} = builder.clamp(${input}${optsStr});`);
@@ -261,10 +442,33 @@ function emitDropout(node: NodeIR, emitter: CodeEmitter): void {
 }
 
 // shape_op_builder.cc
+// WebNN doesn't have a Shape op. ORT decomposes it to constant + slice.
+// Creates a constant tensor from the known input shape, then slices per start/end attrs.
 function emitShape(node: NodeIR, emitter: CodeEmitter): void {
-  const input = emitter.ref(node.inputs[0]);
+  const inputShape = emitter.tensorShape(node.inputs[0]);
+
+  if (!inputShape || inputShape.length === 0) {
+    emitter.comment(`Shape op skipped: input shape unknown for ${node.inputs[0]}`);
+    emitter.markDead(node.outputs[0]);
+    return;
+  }
+
+  // Resolve shape: use numeric values directly, treat dynamic dims as 1
+  // (dynamic dims are symbolic names from the model — at build time we use 1 as default)
   const output = emitter.declare(node.outputs[0]);
-  emitter.line(`const ${output} = builder.shape(${input});`);
+  const dims = inputShape.map((d) => (typeof d === 'number' ? d : 1));
+  const rank = dims.length;
+
+  // Handle start/end attributes (opset 15+)
+  let start = (node.attributes.start as number) ?? 0;
+  let end = (node.attributes.end as number) ?? rank;
+  // Resolve negatives and clamp
+  start = Math.max(0, Math.min(rank, start + (start < 0 ? rank : 0)));
+  end = Math.max(start, Math.min(rank, end + (end < 0 ? rank : 0)));
+
+  const slicedDims = dims.slice(start, end);
+  // Emit as a constant int64 tensor (matching ORT behavior)
+  emitter.line(`const ${output} = builder.constant({ dataType: 'int64', shape: [${slicedDims.length}] }, new BigInt64Array([${slicedDims.map((d) => d + 'n').join(', ')}]));`);
 }
 
 // Register all ops

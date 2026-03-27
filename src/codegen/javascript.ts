@@ -1,7 +1,7 @@
 // JavaScript code generator — emits .js with MLGraphBuilder calls
 // Produces a self-contained buildGraph function + WeightsFile helper.
 
-import type { GraphIR, ConstantInfo } from '../ir/graph.js';
+import type { GraphIR, ConstantInfo, NodeIR } from '../ir/graph.js';
 import { toJsVarName, getTypedArrayName } from '../ir/graph.js';
 import type { CodeEmitter } from '../operators/registry.js';
 import { getEmitter } from '../operators/registry.js';
@@ -137,6 +137,7 @@ export function generateJavaScript(
 
   // Map from tensor name → JS variable name
   const varMap = new Map<string, string>();
+  const deadTensors = new Set<string>();
 
   function getOrDeclare(tensorName: string): string {
     if (varMap.has(tensorName)) return varMap.get(tensorName)!;
@@ -195,6 +196,15 @@ export function generateJavaScript(
     tensorShape(tensorName: string): (number | string)[] | null {
       return graph.shapes?.get(tensorName) ?? null;
     },
+    findProducerNode(tensorName: string): NodeIR | null {
+      return graph.nodes.find((n) => n.outputs.includes(tensorName)) ?? null;
+    },
+    markDead(tensorName: string): void {
+      deadTensors.add(tensorName);
+    },
+    isDead(tensorName: string): boolean {
+      return deadTensors.has(tensorName);
+    },
   };
 
   // --- Emit graph inputs ---
@@ -212,6 +222,8 @@ export function generateJavaScript(
   if (graph.constants.length > 0) {
     emit('// Constants (loaded from weights file)');
     for (const c of graph.constants) {
+      // Skip empty tensors (e.g. ONNX Resize unused roi/scales with shape [0])
+      if (c.shape.some((d) => d === 0)) continue;
       const varName = getOrDeclare(c.name);
       const shape = JSON.stringify(c.shape.map((d) => (typeof d === 'number' ? d : 0)));
       const typedArray = getTypedArrayName(c.dataType);
@@ -386,6 +398,7 @@ export function generateJavaScriptFixed(
   const constantNames = new Set<string>();
   const constantMap = new Map<string, ConstantInfo>();
   const varMap = new Map<string, string>();
+  const deadTensors = new Set<string>();
 
   for (const c of graph.constants) {
     constantNames.add(c.name);
@@ -438,6 +451,9 @@ export function generateJavaScriptFixed(
       return null;
     },
     tensorShape: (t: string) => graph.shapes?.get(t) ?? null,
+    findProducerNode: (t: string) => graph.nodes.find((n) => n.outputs.includes(t)) ?? null,
+    markDead: (t: string) => { deadTensors.add(t); },
+    isDead: (t: string) => deadTensors.has(t),
   };
 
   // --- Emit graph inputs ---
@@ -453,6 +469,8 @@ export function generateJavaScriptFixed(
   if (graph.constants.length > 0) {
     emit('// Constants (loaded from weights file)');
     for (const c of graph.constants) {
+      // Skip empty tensors (e.g. ONNX Resize unused roi/scales with shape [0])
+      if (c.shape.some((d) => d === 0)) continue;
       const varName = getOrDeclare(c.name);
       const shape = JSON.stringify(c.shape.map((d) => (typeof d === 'number' ? d : 0)));
       const typedArray = getTypedArrayName(c.dataType);

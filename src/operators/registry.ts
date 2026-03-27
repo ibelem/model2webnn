@@ -24,6 +24,12 @@ export interface CodeEmitter {
   constantIntValues(tensorName: string): number[] | null;
   // Get the shape of any tensor (inputs, outputs, intermediates, constants)
   tensorShape(tensorName: string): (number | string)[] | null;
+  // Find the node that produces a given tensor (for tracing dynamic computations)
+  findProducerNode(tensorName: string): NodeIR | null;
+  // Mark a tensor as dead (not emitted as a valid MLOperand)
+  markDead(tensorName: string): void;
+  // Check if a tensor was marked dead
+  isDead(tensorName: string): boolean;
 }
 
 export type OpEmitter = (node: NodeIR, emitter: CodeEmitter) => void;
