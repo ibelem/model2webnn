@@ -205,6 +205,7 @@ main {
   box-shadow: var(--shadow-inset);
   font-family: var(--font);
   font-size: .88rem;
+  line-height: 1.5;
   color: var(--text);
   transition: box-shadow .25s var(--ease-out);
   width: 120px;
@@ -498,24 +499,7 @@ main {
   box-shadow: var(--shadow-inset);
 }
 
-/* --- Empty state --- */
-.empty-state {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 280px;
-  background: var(--white);
-  box-shadow: var(--shadow-up);
-  color: var(--text-faint);
-  font-size: .92rem;
-  text-align: center;
-  padding: 2rem;
-  animation: fadeSlideIn .5s var(--ease-out) both;
-  transition: box-shadow .25s var(--ease-out);
-}
-.empty-state:hover {
-  box-shadow: 0 2px 8px rgba(0, 0, 0, .1);
-}
+/* Empty state removed — content area is hidden until model loads */
 
 /* --- Download row (in header) --- */
 .download-row {
@@ -534,6 +518,10 @@ main {
 }
 
 /* --- Footer --- */
+footer {
+  margin-bottom: 2rem;
+}
+
 footer div {
   display: flex;
   justify-content: center;
@@ -548,6 +536,7 @@ footer a {
   color: var(--text-muted);
   text-decoration: none;
   transition: color .2s, transform .15s;
+  margin: 0.15rem;
 }
 footer a:hover {
   color: var(--accent);
@@ -621,22 +610,65 @@ footer a:hover {
   }
 }
 
-/* Tablet: two-column layout */
+/* Tablet+: centered → sidebar transition */
 @media (min-width: 860px) {
+  /* Initial: upload card centered on page */
   main {
     display: grid;
-    grid-template-columns: 340px 1fr;
+    grid-template-columns: 1fr;
+    max-width: 640px;
     gap: 0.5rem;
-    align-items: start;
+    align-content: center;
+    min-height: calc(100dvh - 160px);
+    transition:
+      grid-template-columns .65s var(--ease-out-expo),
+      max-width .65s var(--ease-out-expo),
+      min-height .5s var(--ease-out-expo);
+  }
+
+  /* Content hidden initially */
+  .content {
+    opacity: 0;
+    transform: translateY(12px);
+    pointer-events: none;
+    transition: opacity .45s .2s var(--ease-out), transform .45s .2s var(--ease-out);
+  }
+
+  /* After model loaded: two-column sidebar layout */
+  main.has-model {
+    grid-template-columns: 340px 1fr;
+    max-width: 1400px;
+    min-height: 0;
+    transition:
+      grid-template-columns .5s var(--ease-out-expo),
+      max-width .65s var(--ease-out-expo);
+  }
+
+  main.has-model .content {
+    opacity: 1;
+    transform: translateY(0);
+    pointer-events: auto;
   }
 
   .sidebar {
     position: sticky;
     top: 1.5rem;
+    transition:
+      transform .5s var(--ease-out-expo),
+      opacity .4s var(--ease-out);
+    overflow: hidden;
+    min-width: 0;
   }
 
-  .empty-state {
-    min-height: 211px;
+  /* Full-content mode: sidebar collapses, content takes full width */
+  main.has-model.full-content {
+    grid-template-columns: 0px 1fr;
+  }
+
+  main.has-model.full-content .sidebar {
+    transform: translateX(-20px);
+    opacity: 0;
+    pointer-events: none;
   }
 }
 
@@ -647,10 +679,14 @@ footer a:hover {
     padding: 1rem 1rem 1rem 1.5rem;
   }
 
-  main {
+  main.has-model {
     grid-template-columns: 280px 1fr;
     max-width: 1500px;
     padding: 0 1rem 1rem;
+  }
+
+  main.has-model.full-content {
+    grid-template-columns: 0px 1fr;
   }
 }
 
@@ -877,6 +913,103 @@ footer a:hover {
   width: 100%;
   border: none;
   background: #fff;
+}
+
+/* --- Progress bar --- */
+.progress-container {
+  width: 100%;
+  margin-top: .5rem;
+  animation: fadeSlideIn .3s var(--ease-out) both;
+}
+
+.progress-label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: .35rem;
+  font-size: .8rem;
+  color: var(--text-muted);
+  gap: .5rem;
+}
+
+.progress-filename {
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.progress-stats {
+  flex-shrink: 0;
+  font-family: var(--mono);
+  font-size: .72rem;
+  color: var(--text-faint);
+}
+
+.progress-track {
+  position: relative;
+  width: 100%;
+  height: 6px;
+  background: var(--bg);
+  box-shadow: var(--shadow-inset);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  min-width: 0;
+  background: linear-gradient(90deg, var(--accent), var(--accent-light));
+  border-radius: 3px;
+  transition: width .25s var(--ease-out);
+  will-change: width;
+}
+
+.progress-fill::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, .35) 50%,
+    transparent 100%
+  );
+  animation: progressShimmer 1.5s ease-in-out infinite;
+}
+
+.progress-fill.done {
+  background: linear-gradient(90deg, var(--success), #2ecc71);
+  transition: width .3s var(--ease-out), background .4s;
+}
+
+.progress-fill.done::after {
+  animation: none;
+  opacity: 0;
+}
+
+@keyframes progressShimmer {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(200%); }
+}
+
+/* Indeterminate progress (unknown total size) */
+.progress-fill.indeterminate {
+  width: 30% !important;
+  animation: progressIndeterminate 1.2s var(--ease-out) infinite;
+}
+
+@keyframes progressIndeterminate {
+  0%   { left: -30%; }
+  100% { left: 100%; }
 }
 
 /* --- Reduced motion --- */

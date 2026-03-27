@@ -86,6 +86,16 @@ export function initPreview(result: ConvertResult): void {
     target.classList.add('active');
 
     showPanel(tab);
+
+    // Toggle full-content mode for wide panels
+    const mainEl = document.querySelector('main');
+    if (mainEl) {
+      if (tab === 'reader' || tab === 'mapping') {
+        mainEl.classList.add('full-content');
+      } else {
+        mainEl.classList.remove('full-content');
+      }
+    }
   });
 }
 

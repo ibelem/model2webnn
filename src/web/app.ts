@@ -36,8 +36,9 @@ async function handleModelLoaded(
     document.getElementById('coverageWarning')!.style.display = 'none';
     document.getElementById('previewSection')!.style.display = 'none';
     document.getElementById('downloadSection')!.style.display = 'none';
-    const emptyState = document.getElementById('emptyState');
-    if (emptyState) emptyState.style.display = '';
+
+    // Transition from centered upload to sidebar layout
+    document.querySelector('main')!.classList.add('has-model');
 
     // Quick-parse to detect free dimensions
     const format = detectFormat(buffer);
@@ -80,7 +81,7 @@ function showFreeDimOverrideUI(freeDims: string[]): void {
     const row = document.createElement('div');
     row.className = 'free-dim-row';
     row.innerHTML = `
-      <label for="freeDim_${dim}">${dim}</label>
+      <label for="freeDim_${dim}" title="${dim}">${dim}</label>
       <input type="number" id="freeDim_${dim}" name="freeDim_${dim}" min="1" placeholder="e.g. 1">
     `;
     list.appendChild(row);
@@ -142,7 +143,6 @@ async function runConversion(
   const statusEl = document.getElementById('uploadStatus')!;
   const previewSection = document.getElementById('previewSection')!;
   const downloadSection = document.getElementById('downloadSection')!;
-  const emptyState = document.getElementById('emptyState');
 
   try {
     statusEl.style.display = '';
@@ -189,7 +189,6 @@ async function runConversion(
 
     // Show preview
     previewSection.style.display = '';
-    if (emptyState) emptyState.style.display = 'none';
     const graphInfoEl = document.getElementById('graphInfo')!;
     graphInfoEl.textContent = `${g.inputs.length} inputs · ${g.outputs.length} outputs · ${g.nodes.length} ops`;
 
@@ -203,7 +202,6 @@ async function runConversion(
     statusEl.textContent = `Error: ${(err as Error).message}`;
     previewSection.style.display = 'none';
     downloadSection.style.display = 'none';
-    if (emptyState) emptyState.style.display = '';
   }
 }
 

@@ -17,6 +17,164 @@ let pendingModel: { buffer: Uint8Array; fileName: string } | null = null;
 let pendingRefs: string[] = [];
 let currentCallback: OnModelLoaded | null = null;
 
+// --------------- Progress bar helpers ---------------
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+/** Create (or reuse) a progress bar inside a status element. Returns update/complete callbacks. */
+function createProgressBar(
+  container: HTMLElement,
+  fileName: string,
+): {
+  update: (loaded: number, total: number | null) => void;
+  complete: (finalSize: number) => void;
+  el: HTMLElement;
+} {
+  container.style.display = '';
+  container.className = 'status-banner info';
+
+  const wrapper = document.createElement('div');
+  wrapper.className = 'progress-container';
+  wrapper.innerHTML = `
+    <div class="progress-label">
+      <span class="progress-filename">${escapeHtml(fileName)}</span>
+      <span class="progress-stats">0%</span>
+    </div>
+    <div class="progress-track">
+      <div class="progress-fill" style="width: 0%"></div>
+    </div>`;
+
+  container.innerHTML = '';
+  container.appendChild(wrapper);
+
+  const statsEl = wrapper.querySelector('.progress-stats')!;
+  const fillEl = wrapper.querySelector('.progress-fill') as HTMLElement;
+
+  // If total is unknown, start as indeterminate
+  let wasIndeterminate = false;
+
+  return {
+    el: wrapper,
+    update(loaded: number, total: number | null) {
+      if (total && total > 0) {
+        if (wasIndeterminate) {
+          fillEl.classList.remove('indeterminate');
+          wasIndeterminate = false;
+        }
+        const pct = Math.min(100, (loaded / total) * 100);
+        fillEl.style.width = `${pct.toFixed(1)}%`;
+        statsEl.textContent = `${formatBytes(loaded)} / ${formatBytes(total)}  ·  ${pct.toFixed(0)}%`;
+      } else {
+        if (!wasIndeterminate) {
+          fillEl.classList.add('indeterminate');
+          wasIndeterminate = true;
+        }
+        statsEl.textContent = formatBytes(loaded);
+      }
+    },
+    complete(finalSize: number) {
+      fillEl.classList.remove('indeterminate');
+      fillEl.classList.add('done');
+      fillEl.style.width = '100%';
+      statsEl.textContent = formatBytes(finalSize);
+    },
+  };
+}
+
+function escapeHtml(s: string): string {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+/**
+ * Fetch a URL with streaming progress. Returns the final Uint8Array.
+ * Pre-allocates when Content-Length is available to avoid double memory usage.
+ */
+async function fetchWithProgress(
+  url: string,
+  progress: { update: (loaded: number, total: number | null) => void },
+): Promise<Uint8Array> {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+  }
+
+  const contentLength = response.headers.get('Content-Length');
+  const total = contentLength ? parseInt(contentLength, 10) : null;
+
+  if (!response.body) {
+    // Fallback: no streaming support
+    const buf = new Uint8Array(await response.arrayBuffer());
+    progress.update(buf.byteLength, buf.byteLength);
+    return buf;
+  }
+
+  const reader = response.body.getReader();
+
+  if (total && total > 0) {
+    // Known size: pre-allocate and write directly — avoids double memory usage
+    const result = new Uint8Array(total);
+    let offset = 0;
+
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      result.set(value, offset);
+      offset += value.byteLength;
+      progress.update(offset, total);
+    }
+
+    return offset === total ? result : result.slice(0, offset);
+  }
+
+  // Unknown size: accumulate chunks then merge
+  const chunks: Uint8Array[] = [];
+  let loaded = 0;
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    loaded += value.byteLength;
+    progress.update(loaded, null);
+  }
+
+  const result = new Uint8Array(loaded);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return result;
+}
+
+/**
+ * Read a File with progress tracking.
+ */
+function readFileWithProgress(
+  file: File,
+  progress: { update: (loaded: number, total: number | null) => void },
+): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onprogress = (e) => {
+      progress.update(e.loaded, e.lengthComputable ? e.total : file.size);
+    };
+    reader.onload = () => {
+      const buf = new Uint8Array(reader.result as ArrayBuffer);
+      progress.update(buf.byteLength, buf.byteLength);
+      resolve(buf);
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsArrayBuffer(file);
+  });
+}
+
 export function initUpload(
   onModelLoaded: OnModelLoaded,
   onExternalDataNeeded?: OnExternalDataNeeded,
@@ -103,40 +261,49 @@ export async function fetchFromUrl(
 
   try {
     const fetchUrl = transformHuggingFaceUrl(url);
-    const response = await fetch(fetchUrl);
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-    }
+    let effectiveUrl = fetchUrl;
+    let buffer: Uint8Array;
 
-    const arrayBuffer = await response.arrayBuffer();
-    const buffer = new Uint8Array(arrayBuffer);
     const urlPath = new URL(url).pathname;
     const fileName = urlPath.split('/').pop() ?? 'model.onnx';
+    const pb = createProgressBar(statusEl, fileName);
 
-    statusEl.textContent = `Downloaded: ${fileName} (${(buffer.byteLength / 1024 / 1024).toFixed(2)} MB)`;
+    try {
+      buffer = await fetchWithProgress(fetchUrl, pb);
+    } catch (primaryErr) {
+      // If the original URL is from huggingface.co, retry with hf-mirror.com
+      const mirrorUrl = getHuggingFaceMirrorUrl(url);
+      if (mirrorUrl) {
+        const mirrorPb = createProgressBar(statusEl, `${fileName} (via hf-mirror.com)`);
+        effectiveUrl = transformHuggingFaceUrl(mirrorUrl);
+        buffer = await fetchWithProgress(effectiveUrl, mirrorPb);
+        mirrorPb.complete(buffer.byteLength);
+      } else {
+        throw primaryErr;
+      }
+    }
+
+    pb.complete(buffer.byteLength);
+    const host = new URL(effectiveUrl).hostname;
+    statusEl.querySelector('.progress-filename')!.textContent = `${fileName} — ${formatBytes(buffer.byteLength)} from ${host}`;
 
     // Check for external data refs
     if (fileName.endsWith('.onnx')) {
       const refs = getExternalDataRefs(buffer);
       if (refs.length > 0) {
         // Try to fetch external data files from same URL base
-        const baseUrl = fetchUrl.substring(0, fetchUrl.lastIndexOf('/') + 1);
-        statusEl.textContent = `Fetching ${refs.length} external data file(s)...`;
+        const baseUrl = effectiveUrl.substring(0, effectiveUrl.lastIndexOf('/') + 1);
 
         const externalData: ExternalDataMap = new Map();
         let allFetched = true;
 
         for (const ref of refs) {
           try {
+            const refPb = createProgressBar(statusEl, ref);
             const refUrl = baseUrl + ref;
-            const refResponse = await fetch(transformHuggingFaceUrl(refUrl));
-            if (!refResponse.ok) {
-              allFetched = false;
-              break;
-            }
-            const refBuffer = new Uint8Array(await refResponse.arrayBuffer());
+            const refBuffer = await fetchWithProgress(transformHuggingFaceUrl(refUrl), refPb);
+            refPb.complete(refBuffer.byteLength);
             externalData.set(ref, refBuffer);
-            statusEl.textContent = `Fetched external data: ${ref} (${(refBuffer.byteLength / 1024 / 1024).toFixed(2)} MB)`;
           } catch {
             allFetched = false;
             break;
@@ -174,9 +341,10 @@ async function handleSingleModelFile(
   const statusEl = document.getElementById('uploadStatus')!;
   statusEl.style.display = '';
   statusEl.className = 'status-banner info';
-  statusEl.textContent = `Loading: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)...`;
 
-  const buffer = new Uint8Array(await file.arrayBuffer());
+  const pb = createProgressBar(statusEl, file.name);
+  const buffer = await readFileWithProgress(file, pb);
+  pb.complete(buffer.byteLength);
 
   if (file.name.endsWith('.onnx')) {
     const refs = getExternalDataRefs(buffer);
@@ -184,7 +352,7 @@ async function handleSingleModelFile(
       // Model needs external data — store pending and prompt user
       pendingModel = { buffer, fileName: file.name };
       pendingRefs = refs;
-      statusEl.textContent = `Model loaded. External data files required (${refs.length} file(s)).`;
+      statusEl.querySelector('.progress-filename')!.textContent = `${file.name} — external data files required (${refs.length} file(s))`;
       onExternalDataNeeded?.(refs);
       return;
     }
@@ -218,22 +386,21 @@ async function handleMultipleFiles(
     return;
   }
 
-  statusEl.textContent = `Loading: ${modelFile.name} (${(modelFile.size / 1024 / 1024).toFixed(2)} MB)...`;
-  const modelBuffer = new Uint8Array(await modelFile.arrayBuffer());
+  const pb = createProgressBar(statusEl, modelFile.name);
+  const modelBuffer = await readFileWithProgress(modelFile, pb);
+  pb.complete(modelBuffer.byteLength);
 
   // Check for external data refs
   const dataFiles = files.filter((f) => f !== modelFile);
   if (modelFile.name.endsWith('.onnx') && dataFiles.length > 0) {
     const refs = getExternalDataRefs(modelBuffer);
     if (refs.length > 0) {
-      statusEl.textContent = `Loading ${dataFiles.length} external data file(s)...`;
-
       const externalData: ExternalDataMap = new Map();
       for (const f of dataFiles) {
-        // Use the file name (strip path for folder uploads)
-        const name = f.name;
-        const data = new Uint8Array(await f.arrayBuffer());
-        externalData.set(name, data);
+        const dataPb = createProgressBar(statusEl, f.name);
+        const data = await readFileWithProgress(f, dataPb);
+        dataPb.complete(data.byteLength);
+        externalData.set(f.name, data);
       }
 
       // Check if all refs are satisfied
@@ -246,13 +413,13 @@ async function handleMultipleFiles(
         for (const [k, v] of externalData) {
           pendingExternalData.set(k, v);
         }
-        statusEl.textContent = `Model loaded. Still need ${missing.length} external data file(s).`;
+        statusEl.querySelector('.progress-filename')!.textContent = `${modelFile.name} — still need ${missing.length} external data file(s)`;
         onExternalDataNeeded?.(missing);
         return;
       }
 
       const totalSize = [...externalData.values()].reduce((s, d) => s + d.byteLength, 0);
-      statusEl.textContent = `Loaded: ${modelFile.name} + ${dataFiles.length} external data file(s) (${(totalSize / 1024 / 1024).toFixed(2)} MB total data)`;
+      statusEl.querySelector('.progress-filename')!.textContent = `${modelFile.name} + ${dataFiles.length} file(s) — ${formatBytes(totalSize)} total`;
       await onModelLoaded(modelBuffer, modelFile.name, externalData);
       return;
     }
@@ -272,10 +439,11 @@ async function handleExternalDataFiles(files: File[]): Promise<void> {
   const statusEl = document.getElementById('externalDataStatus')!;
   statusEl.style.display = '';
   statusEl.className = 'status-banner info';
-  statusEl.textContent = `Loading ${files.length} external data file(s)...`;
 
   for (const f of files) {
-    const data = new Uint8Array(await f.arrayBuffer());
+    const pb = createProgressBar(statusEl, f.name);
+    const data = await readFileWithProgress(f, pb);
+    pb.complete(data.byteLength);
     pendingExternalData.set(f.name, data);
   }
 
@@ -335,11 +503,27 @@ export function showExternalDataPrompt(refs: string[]): void {
 function transformHuggingFaceUrl(url: string): string {
   try {
     const parsed = new URL(url);
-    if (parsed.hostname === 'huggingface.co') {
+    if (parsed.hostname === 'huggingface.co' || parsed.hostname === 'hf-mirror.com') {
       return url.replace('/blob/', '/resolve/');
     }
   } catch {
     // Not a valid URL, return as-is
   }
   return url;
+}
+
+/**
+ * Get the hf-mirror.com fallback URL for a HuggingFace URL.
+ */
+function getHuggingFaceMirrorUrl(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname === 'huggingface.co') {
+      parsed.hostname = 'hf-mirror.com';
+      return parsed.toString();
+    }
+  } catch {
+    // ignore
+  }
+  return null;
 }
