@@ -1,7 +1,6 @@
 # Reference code (large, not tracked)
 /reference/*
-/public/models/*.onnx
-/public/models/*.tflite
+/public/models/*
 
 # Dependencies
 node_modules/
