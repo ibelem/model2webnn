@@ -944,13 +944,15 @@ export async function parseTflite(buffer: Uint8Array): Promise<GraphIR> {
     }
 
     // Add quantization info for quantized ops
-    for (const inputIdx of op.inputs) {
+    // Keys use local input position (0, 1, 2) so emitters can look up by node.inputs index
+    for (let localIdx = 0; localIdx < op.inputs.length; localIdx++) {
+      const inputIdx = op.inputs[localIdx];
       if (inputIdx >= 0 && inputIdx < sg.tensors.length) {
         const t = sg.tensors[inputIdx];
         if (t.quantization?.scale?.length) {
-          attributes[`input_${inputIdx}_scale`] = t.quantization.scale;
+          attributes[`input_${localIdx}_scale`] = t.quantization.scale;
           if (t.quantization.zeroPoint?.length) {
-            attributes[`input_${inputIdx}_zero_point`] = t.quantization.zeroPoint;
+            attributes[`input_${localIdx}_zero_point`] = t.quantization.zeroPoint;
           }
         }
       }
@@ -968,6 +970,15 @@ export async function parseTflite(buffer: Uint8Array): Promise<GraphIR> {
     });
   }
 
+  // Build shapes map for all tensors (including scalars with shape [])
+  const shapes = new Map<string, (number | string)[]>();
+  const dataTypes = new Map<string, MLOperandDataType>();
+  for (let i = 0; i < sg.tensors.length; i++) {
+    const t = sg.tensors[i];
+    shapes.set(tensorNames[i], t.shape);
+    dataTypes.set(tensorNames[i], tfliteDataTypeFromId(t.type));
+  }
+
   return {
     name: sg.name || model.description || 'tflite_model',
     format: 'tflite',
@@ -975,6 +986,8 @@ export async function parseTflite(buffer: Uint8Array): Promise<GraphIR> {
     outputs,
     constants,
     nodes,
+    shapes,
+    dataTypes,
   };
 }
 

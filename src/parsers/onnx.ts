@@ -269,13 +269,15 @@ export async function parseOnnx(
 
   // Build shape map from graph inputs, outputs, constants, and value_info
   const shapes = new Map<string, (number | string)[]>();
-  for (const inp of inputs) shapes.set(inp.name, inp.shape);
-  for (const out of outputs) shapes.set(out.name, out.shape);
-  for (const c of constants) shapes.set(c.name, c.shape);
+  const dataTypes = new Map<string, MLOperandDataType>();
+  for (const inp of inputs) { shapes.set(inp.name, inp.shape); dataTypes.set(inp.name, inp.dataType); }
+  for (const out of outputs) { shapes.set(out.name, out.shape); dataTypes.set(out.name, out.dataType); }
+  for (const c of constants) { shapes.set(c.name, c.shape); dataTypes.set(c.name, c.dataType); }
   for (const vi of graph.valueInfo ?? []) {
     const name = vi.name ?? '';
     if (name && !shapes.has(name)) {
       shapes.set(name, extractShape(vi));
+      dataTypes.set(name, extractDataType(vi));
     }
   }
 
@@ -287,5 +289,6 @@ export async function parseOnnx(
     constants,
     nodes,
     shapes,
+    dataTypes,
   };
 }

@@ -11,6 +11,8 @@ export interface GraphIR {
   // Optional shape map for all tensors (inputs, outputs, intermediates)
   // Populated from ONNX value_info, TFLite tensor table, etc.
   shapes?: Map<string, (number | string)[]>;
+  // Optional data type map for all tensors
+  dataTypes?: Map<string, MLOperandDataType>;
 }
 
 export interface TensorInfo {

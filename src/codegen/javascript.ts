@@ -196,6 +196,9 @@ export function generateJavaScript(
     tensorShape(tensorName: string): (number | string)[] | null {
       return graph.shapes?.get(tensorName) ?? null;
     },
+    tensorDataType(tensorName: string): string | null {
+      return graph.dataTypes?.get(tensorName) ?? null;
+    },
     findProducerNode(tensorName: string): NodeIR | null {
       return graph.nodes.find((n) => n.outputs.includes(tensorName)) ?? null;
     },
@@ -451,6 +454,7 @@ export function generateJavaScriptFixed(
       return null;
     },
     tensorShape: (t: string) => graph.shapes?.get(t) ?? null,
+    tensorDataType: (t: string) => graph.dataTypes?.get(t) ?? null,
     findProducerNode: (t: string) => graph.nodes.find((n) => n.outputs.includes(t)) ?? null,
     markDead: (t: string) => { deadTensors.add(t); },
     isDead: (t: string) => deadTensors.has(t),

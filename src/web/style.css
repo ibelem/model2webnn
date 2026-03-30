@@ -443,18 +443,44 @@ main {
 
 /* --- Tab bar --- */
 .tab-bar {
-  display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
-  gap: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: .25rem;
   background: var(--bg);
   padding: .5rem;
   align-items: stretch;
 }
 
+/* Expand/collapse toggle button */
+.tab-expand-toggle {
+  display: none; /* hidden on mobile, shown at 860px+ */
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color .2s, background .2s;
+  box-shadow: var(--shadow-inset);
+}
+.tab-expand-toggle:hover {
+  color: var(--accent);
+  background: rgba(0, 47, 167, .05);
+}
+.tab-expand-toggle:active {
+  transform: scale(.95);
+}
+/* Icon visibility: show expand by default, collapse when active */
+.tab-expand-toggle .collapse-icon { display: none; }
+.tab-expand-toggle .expand-icon { display: block; }
+.tab-expand-toggle.active .collapse-icon { display: block; }
+.tab-expand-toggle.active .expand-icon { display: none; }
+
 .tab-group {
   display: flex;
   gap: .25rem;
-  justify-content: center;
+  flex-shrink: 0;
 }
 
 .tab {
@@ -546,9 +572,9 @@ footer a:hover {
   margin-right: 0.5rem;
 }
 .examples a {
-  color: white;
+  border: 1px solid rgba(255, 0, 129, 1);
+  color: rgba(255, 0, 129, 1);
   padding: 0px 0.5rem;
-  background-color: rgba(255, 0, 129, 1);
   border-radius: 3px;
   display: inline-flex;
   align-items: center;
@@ -559,8 +585,16 @@ footer a:hover {
   margin-right: 0.25rem;
 }
 
+.examples a svg path {
+  fill: rgba(255, 0, 129, 1);
+}
+
+.examples a:hover svg path {
+  fill: white;
+}
+
 .examples a:hover {
-  background-color: rgb(255, 0, 149);
+  background-color: rgba(255, 0, 129, 1);
   color: white;
 }
 .dot { margin: 0 .35rem; }
@@ -608,6 +642,15 @@ footer a:hover {
     flex-direction: column;
     gap: .25rem;
   }
+
+  .tab-bar {
+    gap: .125rem;
+  }
+
+  .tab {
+    padding: .2rem .5rem;
+    font-size: .75rem;
+  }
 }
 
 /* Tablet+: centered → sidebar transition */
@@ -650,6 +693,10 @@ footer a:hover {
     pointer-events: auto;
   }
 
+  .tab-expand-toggle {
+    display: inline-flex;
+  }
+
   .sidebar {
     position: sticky;
     top: 1.5rem;
@@ -663,6 +710,7 @@ footer a:hover {
   /* Full-content mode: sidebar collapses, content takes full width */
   main.has-model.full-content {
     grid-template-columns: 0px 1fr;
+    gap: 0;
   }
 
   main.has-model.full-content .sidebar {

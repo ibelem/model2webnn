@@ -86,17 +86,19 @@ export function initPreview(result: ConvertResult): void {
     target.classList.add('active');
 
     showPanel(tab);
-
-    // Toggle full-content mode for wide panels
-    const mainEl = document.querySelector('main');
-    if (mainEl) {
-      if (tab === 'reader' || tab === 'mapping') {
-        mainEl.classList.add('full-content');
-      } else {
-        mainEl.classList.remove('full-content');
-      }
-    }
   });
+
+  // Expand/collapse toggle — sidebar visibility
+  const toggleBtn = newTabBar.querySelector('#tabExpandToggle') as HTMLElement | null;
+  if (toggleBtn) {
+    toggleBtn.addEventListener('click', () => {
+      const mainEl = document.querySelector('main');
+      if (!mainEl) return;
+      const isExpanded = mainEl.classList.toggle('full-content');
+      toggleBtn.classList.toggle('active', isExpanded);
+      toggleBtn.title = isExpanded ? 'Show sidebar' : 'Expand to full width';
+    });
+  }
 }
 
 function showPanel(tab: string): void {

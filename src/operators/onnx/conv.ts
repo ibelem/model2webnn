@@ -38,13 +38,42 @@ function emitConv(node: NodeIR, emitter: CodeEmitter): void {
     opts.push(`groups: ${group}`);
   }
 
-  // auto_pad handling
+  // auto_pad handling — compute explicit padding since autoPad is not in the WebNN spec
   const autoPad = node.attributes.auto_pad as string | undefined;
-  if (autoPad && autoPad !== 'NOTSET') {
-    if (autoPad === 'SAME_UPPER') {
-      opts.push(`autoPad: 'same-upper'`);
-    } else if (autoPad === 'SAME_LOWER') {
-      opts.push(`autoPad: 'same-lower'`);
+  if (autoPad && autoPad !== 'NOTSET' && (autoPad === 'SAME_UPPER' || autoPad === 'SAME_LOWER')) {
+    // ONNX NCHW: H=shape[2], W=shape[3]
+    const inputShape = emitter.tensorShape(node.inputs[0]);
+    const weightShape = emitter.constantShape(node.inputs[1]);
+    if (inputShape && typeof inputShape[2] === 'number' && typeof inputShape[3] === 'number') {
+      const inH = inputShape[2] as number;
+      const inW = inputShape[3] as number;
+      // For conv2d, kernel H/W at indices 2,3 (OIHW default)
+      const kH = weightShape[2];
+      const kW = weightShape[3];
+      const sH = strides ? strides[0] : 1;
+      const sW = strides ? strides[1] : 1;
+      const dH = dilations ? dilations[0] : 1;
+      const dW = dilations ? dilations[1] : 1;
+      const effectiveKH = (kH - 1) * dH + 1;
+      const effectiveKW = (kW - 1) * dW + 1;
+      const outH = Math.ceil(inH / sH);
+      const outW = Math.ceil(inW / sW);
+      const totalPadH = Math.max(0, (outH - 1) * sH + effectiveKH - inH);
+      const totalPadW = Math.max(0, (outW - 1) * sW + effectiveKW - inW);
+      if (autoPad === 'SAME_UPPER') {
+        const padTop = Math.floor(totalPadH / 2);
+        const padBottom = totalPadH - padTop;
+        const padLeft = Math.floor(totalPadW / 2);
+        const padRight = totalPadW - padLeft;
+        opts.push(`padding: [${padTop}, ${padBottom}, ${padLeft}, ${padRight}]`);
+      } else {
+        // SAME_LOWER: extra padding goes to beginning
+        const padBottom = Math.floor(totalPadH / 2);
+        const padTop = totalPadH - padBottom;
+        const padRight = Math.floor(totalPadW / 2);
+        const padLeft = totalPadW - padRight;
+        opts.push(`padding: [${padTop}, ${padBottom}, ${padLeft}, ${padRight}]`);
+      }
     }
   }
 

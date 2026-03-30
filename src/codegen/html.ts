@@ -56,8 +56,8 @@ export function generateHtml(
   <title>${escapeHtml(title)}</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: system-ui, -apple-system, sans-serif; background: #f8f9fa; color: #1a1a1a; padding: 2rem; }
-    .container { max-width: 900px; margin: 0 auto; }
+    body { font-family: system-ui, -apple-system, sans-serif; background: #f8f9fa; color: #1a1a1a; padding: 1rem; }
+    .container { margin: 0 auto; }
     h1 { font-size: 1.5rem; margin-bottom: 0.5rem; }
     .subtitle { color: #666; margin-bottom: 1.5rem; font-size: 0.9rem; }
     .card { background: #fff; padding: 1.5rem; margin-bottom: 1rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
@@ -72,6 +72,7 @@ export function generateHtml(
     .status.success { background: #e8f5e9; border-left: 3px solid #4CAF50; }
     .status.error { background: #ffebee; border-left: 3px solid #f44336; }
     table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; font-size: 0.85rem; }
+    table tr {display: grid; grid-template-columns: 1fr 1fr 1fr; }
     th, td { text-align: left; padding: 0.5rem; border-bottom: 1px solid #eee; }
     th { color: #666; font-weight: 600; }
     pre { margin-top: 1rem; background: #f5f5f5; padding: 1rem; overflow-x: auto; font-size: 0.8rem; max-height: 200px; }
