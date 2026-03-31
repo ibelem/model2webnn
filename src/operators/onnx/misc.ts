@@ -198,20 +198,72 @@ function emitCumSum(node: NodeIR, emitter: CodeEmitter): void {
   emitter.line(`const ${output} = builder.cumulativeSum(${input}, ${axis}${optsStr});`);
 }
 
-// depth_space_op_builder.cc
+// depthToSpace_op_builder.cc — DepthToSpace
+// Ported from: reference/microsoft/onnxruntime/core/providers/webnn/builders/impl/depthToSpace_op_builder.cc
+// WebNN does not have depthToSpace; ORT decomposes it into reshape → transpose → reshape.
 function emitDepthToSpace(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
   const output = emitter.declare(node.outputs[0]);
   const blocksize = (node.attributes.blocksize as number) ?? 1;
   const mode = (node.attributes.mode as string) ?? 'DCR';
-  emitter.line(`const ${output} = builder.depthToSpace(${input}, ${blocksize}, { mode: '${mode === 'CRD' ? 'CRD' : 'DCR'}' });`);
+
+  // Requires known input shape [batch, channels, height, width]
+  const inputShape = emitter.tensorShape(node.inputs[0]);
+  if (!inputShape || inputShape.length !== 4) {
+    emitter.comment(`DepthToSpace: unknown input shape, cannot decompose`);
+    return;
+  }
+  const [batch, channels, height, width] = inputShape;
+  const newC = `${Number(channels) / (blocksize * blocksize)}`;
+  const newH = `${Number(height) * blocksize}`;
+  const newW = `${Number(width) * blocksize}`;
+
+  let shape1: string;
+  let perm: string;
+  if (mode === 'CRD') {
+    shape1 = `[${batch}, ${newC}, ${blocksize}, ${blocksize}, ${height}, ${width}]`;
+    perm = `[0, 1, 4, 2, 5, 3]`;
+  } else {
+    // DCR (default)
+    shape1 = `[${batch}, ${blocksize}, ${blocksize}, ${newC}, ${height}, ${width}]`;
+    perm = `[0, 3, 4, 1, 5, 2]`;
+  }
+  const shape2 = `[${batch}, ${newC}, ${newH}, ${newW}]`;
+
+  // Step 1: Reshape to 6D
+  emitter.line(`const ${output}_r1 = builder.reshape(${input}, ${shape1});`);
+  // Step 2: Transpose
+  emitter.line(`const ${output}_t = builder.transpose(${output}_r1, { permutation: ${perm} });`);
+  // Step 3: Reshape to output shape
+  emitter.line(`const ${output} = builder.reshape(${output}_t, ${shape2});`);
 }
 
+// SpaceToDepth — inverse of DepthToSpace, decomposed into reshape → transpose → reshape.
 function emitSpaceToDepth(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
   const output = emitter.declare(node.outputs[0]);
   const blocksize = (node.attributes.blocksize as number) ?? 1;
-  emitter.line(`const ${output} = builder.spaceToDepth(${input}, ${blocksize});`);
+
+  const inputShape = emitter.tensorShape(node.inputs[0]);
+  if (!inputShape || inputShape.length !== 4) {
+    emitter.comment(`SpaceToDepth: unknown input shape, cannot decompose`);
+    return;
+  }
+  const [batch, channels, height, width] = inputShape;
+  const newC = `${Number(channels) * blocksize * blocksize}`;
+  const newH = `${Number(height) / blocksize}`;
+  const newW = `${Number(width) / blocksize}`;
+
+  // Reshape [b, c, h, w] → [b, c, h/bs, bs, w/bs, bs]
+  const shape1 = `[${batch}, ${channels}, ${newH}, ${blocksize}, ${newW}, ${blocksize}]`;
+  // Transpose → [b, c, bs, bs, h/bs, w/bs]
+  const perm = `[0, 1, 3, 5, 2, 4]`;
+  // Reshape → [b, c*bs*bs, h/bs, w/bs]
+  const shape2 = `[${batch}, ${newC}, ${newH}, ${newW}]`;
+
+  emitter.line(`const ${output}_r1 = builder.reshape(${input}, ${shape1});`);
+  emitter.line(`const ${output}_t = builder.transpose(${output}_r1, { permutation: ${perm} });`);
+  emitter.line(`const ${output} = builder.reshape(${output}_t, ${shape2});`);
 }
 
 // triangular_op_builder.cc
@@ -307,7 +359,7 @@ function emitQDQ(node: NodeIR, emitter: CodeEmitter): void {
 
   // ORT qdq_op_builder.cc: WebNN requires scale and zeroPoint to have the same rank as input.
   // For per-tensor quantization (scalar scale), reshape to [1,1,...,1].
-  // For per-axis quantization with axis != last, reshape to [1,...,N,...,1].
+  // For per-axis quantization (1D scale), reshape to [1,...,N,...,1] with N at the axis position.
   let scaleRef = scale;
   let zpRef: string | undefined;
   let zpShape: string | undefined; // track shape for synthesized zeroPoint
@@ -328,8 +380,9 @@ function emitQDQ(node: NodeIR, emitter: CodeEmitter): void {
       emitter.line(`const ${zpRef} = builder.reshape(${emitter.ref(node.inputs[2])}, [${targetShape.join(', ')}]);`);
     }
   } else if (effectiveScaleRank === 1 && inputRank > 1 &&
-             blockSize === 0 && axis !== inputRank - 1) {
-    // Per-axis quantization: reshape scale to [1,...,scaleSize,...,1] for broadcasting.
+             blockSize === 0) {
+    // Per-axis quantization: reshape scale to [1,...,scaleSize,...,1] to match input rank.
+    // WebNN requires scale rank == input rank (Chromium validates this strictly).
     const scaleSize = scaleShape ? scaleShape[0] : (scaleShapeFromGraph ? scaleShapeFromGraph[0] : null);
     if (scaleSize !== null) {
       const targetShape = Array(inputRank).fill(1);

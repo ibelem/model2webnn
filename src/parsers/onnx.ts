@@ -337,6 +337,10 @@ export async function parseOnnx(
     }
   }
 
+  // Propagate shapes through shape-preserving ops when value_info is missing.
+  // QDQ models often lack value_info for intermediate QuantizeLinear/DequantizeLinear outputs.
+  propagateShapes(nodes, shapes, dataTypes);
+
   return {
     name: graph.name || 'model',
     format: 'onnx',
@@ -347,4 +351,165 @@ export async function parseOnnx(
     shapes,
     dataTypes,
   };
+}
+
+/**
+ * Propagate shapes through ops for intermediate tensors that have missing or
+ * dynamic-dim shapes in value_info. Runs a single forward pass through nodes,
+ * overwriting dynamic string dims with concrete numbers when computable.
+ */
+const SHAPE_PRESERVING_OPS = new Set([
+  'QuantizeLinear', 'DequantizeLinear',
+  'Relu', 'Sigmoid', 'Tanh', 'Elu', 'Gelu', 'HardSigmoid', 'HardSwish',
+  'LeakyRelu', 'Softplus', 'Softsign',
+  'Abs', 'Ceil', 'Cos', 'Erf', 'Exp', 'Floor', 'Identity', 'Log',
+  'Neg', 'Reciprocal', 'Round', 'Sign', 'Sin', 'Sqrt', 'Tan', 'Not',
+  'Cast', 'Dropout', 'Clip',
+]);
+
+// Element-wise ops where output shape = broadcast(input shapes)
+const ELEMENTWISE_OPS = new Set([
+  'Add', 'Sub', 'Mul', 'Div', 'Pow', 'PRelu',
+  'Equal', 'Greater', 'GreaterOrEqual', 'Less', 'LessOrEqual',
+  'Min', 'Max', 'Mean', 'Where',
+]);
+
+function isFullyStatic(shape: (number | string)[]): boolean {
+  return shape.every(d => typeof d === 'number');
+}
+
+function propagateShapes(
+  nodes: NodeIR[],
+  shapes: Map<string, (number | string)[]>,
+  _dataTypes: Map<string, MLOperandDataType>,
+): void {
+  for (const node of nodes) {
+    // Shape-preserving ops: output shape = input shape
+    if (SHAPE_PRESERVING_OPS.has(node.opType)) {
+      const inputShape = shapes.get(node.inputs[0]);
+      if (!inputShape) continue;
+      for (const out of node.outputs) {
+        if (!out) continue;
+        const existing = shapes.get(out);
+        if (!existing) {
+          shapes.set(out, [...inputShape]);
+        } else if (!isFullyStatic(existing) && isFullyStatic(inputShape)) {
+          // Replace dynamic dims with concrete ones
+          shapes.set(out, [...inputShape]);
+        }
+      }
+      continue;
+    }
+
+    // Element-wise binary ops: use the input with the most concrete shape info
+    if (ELEMENTWISE_OPS.has(node.opType)) {
+      let bestShape: (number | string)[] | null = null;
+      for (const inp of node.inputs) {
+        const s = inp ? shapes.get(inp) : null;
+        if (!s) continue;
+        if (!bestShape || (isFullyStatic(s) && !isFullyStatic(bestShape)) ||
+            (s.length > bestShape.length)) {
+          bestShape = s;
+        }
+      }
+      if (bestShape) {
+        for (const out of node.outputs) {
+          if (!out) continue;
+          const existing = shapes.get(out);
+          if (!existing) {
+            shapes.set(out, [...bestShape]);
+          } else if (!isFullyStatic(existing) && isFullyStatic(bestShape)) {
+            shapes.set(out, [...bestShape]);
+          }
+        }
+      }
+      continue;
+    }
+
+    // Conv/ConvTranspose: infer output spatial dims from input + attributes
+    if (node.opType === 'Conv' || node.opType === 'ConvInteger') {
+      const inputShape = shapes.get(node.inputs[0]);
+      const weightShape = shapes.get(node.inputs[1]);
+      if (!inputShape || !weightShape || inputShape.length < 3) continue;
+
+      const rank = inputShape.length;
+      const spatialDims = rank - 2; // N, C, [spatial...]
+      const strides = (node.attributes.strides as number[]) ?? Array(spatialDims).fill(1);
+      const dilations = (node.attributes.dilations as number[]) ?? Array(spatialDims).fill(1);
+      const pads = (node.attributes.pads as number[]) ?? Array(spatialDims * 2).fill(0);
+      const outChannels = weightShape[0]; // OIHW weight layout
+
+      const outShape: (number | string)[] = [inputShape[0], outChannels];
+      for (let i = 0; i < spatialDims; i++) {
+        const inDim = inputShape[i + 2];
+        const kernDim = weightShape[i + 2];
+        if (typeof inDim === 'number' && typeof kernDim === 'number') {
+          const effectiveKernel = (kernDim - 1) * dilations[i] + 1;
+          const padded = inDim + pads[i] + pads[i + spatialDims];
+          outShape.push(Math.floor((padded - effectiveKernel) / strides[i]) + 1);
+        } else {
+          outShape.push(typeof inDim === 'string' ? inDim : `d${i}`);
+        }
+      }
+
+      for (const out of node.outputs) {
+        if (!out) continue;
+        const existing = shapes.get(out);
+        if (!existing) {
+          shapes.set(out, outShape);
+        } else if (!isFullyStatic(existing) && isFullyStatic(outShape)) {
+          shapes.set(out, outShape);
+        }
+      }
+      continue;
+    }
+
+    // DepthToSpace: output shape from input shape + blocksize
+    if (node.opType === 'DepthToSpace') {
+      const inputShape = shapes.get(node.inputs[0]);
+      if (!inputShape || inputShape.length !== 4) continue;
+      const blocksize = (node.attributes.blocksize as number) ?? 1;
+      const [b, c, h, w] = inputShape;
+      const outShape: (number | string)[] = [
+        b,
+        typeof c === 'number' ? c / (blocksize * blocksize) : c,
+        typeof h === 'number' ? h * blocksize : h,
+        typeof w === 'number' ? w * blocksize : w,
+      ];
+      for (const out of node.outputs) {
+        if (!out) continue;
+        const existing = shapes.get(out);
+        if (!existing) {
+          shapes.set(out, outShape);
+        } else if (!isFullyStatic(existing) && isFullyStatic(outShape)) {
+          shapes.set(out, outShape);
+        }
+      }
+      continue;
+    }
+
+    // SpaceToDepth: inverse of DepthToSpace
+    if (node.opType === 'SpaceToDepth') {
+      const inputShape = shapes.get(node.inputs[0]);
+      if (!inputShape || inputShape.length !== 4) continue;
+      const blocksize = (node.attributes.blocksize as number) ?? 1;
+      const [b, c, h, w] = inputShape;
+      const outShape: (number | string)[] = [
+        b,
+        typeof c === 'number' ? c * blocksize * blocksize : c,
+        typeof h === 'number' ? Math.floor(h / blocksize) : h,
+        typeof w === 'number' ? Math.floor(w / blocksize) : w,
+      ];
+      for (const out of node.outputs) {
+        if (!out) continue;
+        const existing = shapes.get(out);
+        if (!existing) {
+          shapes.set(out, outShape);
+        } else if (!isFullyStatic(existing) && isFullyStatic(outShape)) {
+          shapes.set(out, outShape);
+        }
+      }
+      continue;
+    }
+  }
 }

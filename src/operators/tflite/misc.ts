@@ -52,18 +52,64 @@ function emitArgMin(node: NodeIR, emitter: CodeEmitter): void {
   emitter.line(`const ${output} = builder.argMin(${input}, ${axis}${keepDims ? '' : ', { keepDimensions: false }'});`);
 }
 
+// WebNN does not have depthToSpace; decompose into reshape → transpose → reshape.
+// TFLite uses NHWC layout.
 function emitDepthToSpace(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
   const output = emitter.declare(node.outputs[0]);
   const blockSize = (node.attributes.block_size as number) ?? 2;
-  emitter.line(`const ${output} = builder.depthToSpace(${input}, ${blockSize});`);
+
+  const inputShape = emitter.tensorShape(node.inputs[0]);
+  if (!inputShape || inputShape.length !== 4) {
+    emitter.comment(`DepthToSpace: unknown input shape, cannot decompose`);
+    return;
+  }
+  // NHWC: [batch, height, width, channels]
+  const [batch, height, width, channels] = inputShape;
+  const newC = `${Number(channels) / (blockSize * blockSize)}`;
+  const newH = `${Number(height) * blockSize}`;
+  const newW = `${Number(width) * blockSize}`;
+
+  // Reshape [b, h, w, c] → [b, h, w, bs, bs, newC]
+  const shape1 = `[${batch}, ${height}, ${width}, ${blockSize}, ${blockSize}, ${newC}]`;
+  // Transpose → [b, h, bs, w, bs, newC]
+  const perm = `[0, 1, 3, 2, 4, 5]`;
+  // Reshape → [b, newH, newW, newC]
+  const shape2 = `[${batch}, ${newH}, ${newW}, ${newC}]`;
+
+  emitter.line(`const ${output}_r1 = builder.reshape(${input}, ${shape1});`);
+  emitter.line(`const ${output}_t = builder.transpose(${output}_r1, { permutation: ${perm} });`);
+  emitter.line(`const ${output} = builder.reshape(${output}_t, ${shape2});`);
 }
 
+// WebNN does not have spaceToDepth; decompose into reshape → transpose → reshape.
+// TFLite uses NHWC layout.
 function emitSpaceToDepth(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
   const output = emitter.declare(node.outputs[0]);
   const blockSize = (node.attributes.block_size as number) ?? 2;
-  emitter.line(`const ${output} = builder.spaceToDepth(${input}, ${blockSize});`);
+
+  const inputShape = emitter.tensorShape(node.inputs[0]);
+  if (!inputShape || inputShape.length !== 4) {
+    emitter.comment(`SpaceToDepth: unknown input shape, cannot decompose`);
+    return;
+  }
+  // NHWC: [batch, height, width, channels]
+  const [batch, height, width, channels] = inputShape;
+  const newC = `${Number(channels) * blockSize * blockSize}`;
+  const newH = `${Number(height) / blockSize}`;
+  const newW = `${Number(width) / blockSize}`;
+
+  // Reshape [b, h, w, c] → [b, h/bs, bs, w/bs, bs, c]
+  const shape1 = `[${batch}, ${newH}, ${blockSize}, ${newW}, ${blockSize}, ${channels}]`;
+  // Transpose → [b, h/bs, w/bs, bs, bs, c]
+  const perm = `[0, 1, 3, 2, 4, 5]`;
+  // Reshape → [b, h/bs, w/bs, c*bs*bs]
+  const shape2 = `[${batch}, ${newH}, ${newW}, ${newC}]`;
+
+  emitter.line(`const ${output}_r1 = builder.reshape(${input}, ${shape1});`);
+  emitter.line(`const ${output}_t = builder.transpose(${output}_r1, { permutation: ${perm} });`);
+  emitter.line(`const ${output} = builder.reshape(${output}_t, ${shape2});`);
 }
 
 function emitCumSum(node: NodeIR, emitter: CodeEmitter): void {

@@ -51,7 +51,7 @@ const onnxToWebnn: Record<string, string> = {
   ArgMax: 'argMax', ArgMin: 'argMin',
   GatherElements: 'gatherElements', GatherND: 'gatherND',
   ScatterElements: 'scatterElements', ScatterND: 'scatterND',
-  CumSum: 'cumulativeSum', DepthToSpace: 'depthToSpace', SpaceToDepth: 'spaceToDepth',
+  CumSum: 'cumulativeSum', DepthToSpace: 'reshape + transpose (d2s)', SpaceToDepth: 'reshape + transpose (s2d)',
   Trilu: 'triangular',
   Dropout: 'identity (dropout)', // pass-through at inference
   // Quantization
