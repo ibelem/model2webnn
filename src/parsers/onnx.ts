@@ -540,7 +540,6 @@ function propagateShapes(
     if (node.opType === 'Reshape') {
       const shapeInput = node.inputs[1];
       if (!shapeInput) continue;
-      const shapeFromMap = shapes.get(shapeInput);
       // The shape tensor itself is a 1D constant; get its values from the constants.
       // We can't easily read constant values here, but if the output already has
       // shape info from value_info, that's used. This handles Flatten, which is
