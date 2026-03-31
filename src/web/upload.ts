@@ -287,6 +287,16 @@ export async function fetchFromUrl(
     const host = new URL(effectiveUrl).hostname;
     statusEl.querySelector('.progress-filename')!.textContent = `${fileName} — ${formatBytes(buffer.byteLength)} from ${host}`;
 
+    // Detect Git LFS pointer files returned by raw.githubusercontent.com
+    const LFS_MAGIC = 'version https://git-lfs.github.com/spec/v1';
+    const prefix = new TextDecoder().decode(buffer.slice(0, LFS_MAGIC.length));
+    if (prefix === LFS_MAGIC) {
+      throw new Error(
+        'This file is stored in Git LFS — GitHub returns a pointer file instead of the real content. ' +
+        'Use a HuggingFace URL, download via "git lfs pull", or find a direct CDN link.',
+      );
+    }
+
     // Check for external data refs
     if (fileName.endsWith('.onnx')) {
       const refs = getExternalDataRefs(buffer);
@@ -503,6 +513,18 @@ export function showExternalDataPrompt(refs: string[]): void {
 function transformHuggingFaceUrl(url: string): string {
   try {
     const parsed = new URL(url);
+
+    // GitHub raw file URLs redirect through github.com which strips CORS headers.
+    // Rewrite directly to raw.githubusercontent.com to avoid the redirect.
+    // github.com/:owner/:repo/raw/:branch/:path
+    //   → raw.githubusercontent.com/:owner/:repo/:branch/:path
+    if (parsed.hostname === 'github.com') {
+      const m = parsed.pathname.match(/^\/([^/]+)\/([^/]+)\/raw\/(.+)$/);
+      if (m) {
+        return `https://raw.githubusercontent.com/${m[1]}/${m[2]}/${m[3]}`;
+      }
+    }
+
     if (parsed.hostname === 'huggingface.co' || parsed.hostname === 'hf-mirror.com') {
       return url.replace('/blob/', '/resolve/');
     }

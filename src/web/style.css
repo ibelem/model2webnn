@@ -309,8 +309,8 @@ main {
   color: #0ca843;
 }
 .status-banner.error {
-  background: #fceaea;
-  color: #f50655;
+  background: rgba(255, 0, 129, 0.05);
+  color: rgba(255, 0, 129, 1);
 }
 
 /* --- Sub-cards (nested neumorphic panels) --- */

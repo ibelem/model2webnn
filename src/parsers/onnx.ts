@@ -210,6 +210,20 @@ export async function parseOnnx(
   buffer: Uint8Array,
   externalData?: ExternalDataMap,
 ): Promise<GraphIR> {
+  // Detect Git LFS pointer files — raw.githubusercontent.com returns these instead
+  // of actual binary content for LFS-tracked files. They start with:
+  //   "version https://git-lfs.github.com/spec/v1"
+  const LFS_MAGIC = 'version https://git-lfs.github.com/spec/v1';
+  const prefix = new TextDecoder().decode(buffer.slice(0, LFS_MAGIC.length));
+  if (prefix === LFS_MAGIC) {
+    throw new Error(
+      'This file is a Git LFS pointer, not the actual model. ' +
+      'GitHub raw URLs return LFS pointers instead of file contents for large files. ' +
+      'To get the real model: use a HuggingFace URL, download it via "git lfs pull", ' +
+      'or find a direct CDN download link.',
+    );
+  }
+
   const decoded = onnx.ModelProto.decode(buffer);
   const graph = decoded.graph;
 
