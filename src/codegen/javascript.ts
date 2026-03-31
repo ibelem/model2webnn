@@ -351,7 +351,9 @@ export function generateJavaScript(
   emit(
     `const weights = await WeightsFile.load('${weightsFileName}', '${manifestFileName}');`,
   );
+  emit('const buildStart = performance.now();');
   emit('const graph = await buildGraph(context, weights);');
+  emit("console.log(`Graph build: ${(performance.now() - buildStart).toFixed(2)}ms on ${deviceType.toUpperCase()}`)");
   emit('');
   emit('// Create input tensors');
   for (const input of graph.inputs) {
@@ -398,7 +400,28 @@ export function generateJavaScript(
     emit(`const result_${toJsVarName(output.name)} = new ${typedArray}(await context.readTensor(outputTensor_${toJsVarName(output.name)}));`);
   }
   emit("const elapsed = (performance.now() - start).toFixed(2);");
-  emit('console.log(`Inference completed in ${elapsed}ms`);');
+  emit('console.log(`Inference: ${elapsed}ms (1 run) on ${deviceType.toUpperCase()}`);');
+  emit('');
+  emit('// Benchmark: 50 runs');
+  emit('const NUM_RUNS = 50;');
+  emit('const runTimes = [];');
+  emit('for (let i = 0; i < NUM_RUNS; i++) {');
+  indentLevel++;
+  emit('const t0 = performance.now();');
+  emit('context.dispatch(graph, inputs, outputs);');
+  for (const output of graph.outputs) {
+    const dt = effectiveOutputTypes.get(output.name) ?? output.dataType;
+    const typedArray = getTypedArrayName(dt);
+    emit(`new ${typedArray}(await context.readTensor(outputTensor_${toJsVarName(output.name)}));`);
+  }
+  emit('runTimes.push(performance.now() - t0);');
+  indentLevel--;
+  emit('}');
+  emit('const avgTime = (runTimes.reduce((a, b) => a + b, 0) / NUM_RUNS).toFixed(2);');
+  emit('const sorted = [...runTimes].sort((a, b) => a - b);');
+  emit('const medianTime = (NUM_RUNS % 2 ? sorted[NUM_RUNS >> 1] : (sorted[NUM_RUNS / 2 - 1] + sorted[NUM_RUNS / 2]) / 2).toFixed(2);');
+  emit("console.log(`Inference: ${avgTime}ms (average \\u00b7 ${NUM_RUNS} runs) on ${deviceType.toUpperCase()}`)");
+  emit("console.log(`Inference: ${medianTime}ms (median \\u00b7 ${NUM_RUNS} runs) on ${deviceType.toUpperCase()}`)");
   emit('');
   emit('// Access results');
   for (const output of graph.outputs) {
@@ -672,7 +695,9 @@ function emitMainFunction(
   emit("if (!navigator.ml) throw new Error('WebNN is not supported in this browser.');");
   emit('const context = await navigator.ml.createContext({ deviceType });');
   emit(`const weights = await WeightsFile.load('${weightsFileName}', '${manifestFileName}');`);
+  emit('const buildStart = performance.now();');
   emit('const graph = await buildGraph(context, weights);');
+  emit('console.log(`Graph build: ${(performance.now() - buildStart).toFixed(2)}ms on ${deviceType.toUpperCase()}`)');
   emit('');
   emit('// Create input tensors');
   for (const input of graph.inputs) {
@@ -719,7 +744,30 @@ function emitMainFunction(
     const vn = toJsVarName(output.name);
     emit(`const result_${vn} = new ${typedArray}(await context.readTensor(outputTensor_${vn}));`);
   }
-  emit("console.log(`Inference completed in ${(performance.now() - start).toFixed(2)}ms`);");
+  emit("console.log(`Inference: ${(performance.now() - start).toFixed(2)}ms (1 run) on ${deviceType.toUpperCase()}`)");
+  emit('');
+  emit('// Benchmark: 50 runs');
+  emit('const NUM_RUNS = 50;');
+  emit('const runTimes = [];');
+  emit('for (let i = 0; i < NUM_RUNS; i++) {');
+  inc();
+  emit('const t0 = performance.now();');
+  emit('context.dispatch(graph, inputs, outputs);');
+  for (const output of graph.outputs) {
+    const dt = effectiveOutputTypes.get(output.name) ?? output.dataType;
+    const typedArray = getTypedArrayName(dt);
+    const vn = toJsVarName(output.name);
+    emit(`new ${typedArray}(await context.readTensor(outputTensor_${vn}));`);
+  }
+  emit('runTimes.push(performance.now() - t0);');
+  dec();
+  emit('}');
+  emit('const avgTime = (runTimes.reduce((a, b) => a + b, 0) / NUM_RUNS).toFixed(2);');
+  emit('const sorted = [...runTimes].sort((a, b) => a - b);');
+  emit('const medianTime = (NUM_RUNS % 2 ? sorted[NUM_RUNS >> 1] : (sorted[NUM_RUNS / 2 - 1] + sorted[NUM_RUNS / 2]) / 2).toFixed(2);');
+  emit("console.log(`Inference: ${avgTime}ms (average \\u00b7 ${NUM_RUNS} runs) on ${deviceType.toUpperCase()}`)");
+  emit("console.log(`Inference: ${medianTime}ms (median \\u00b7 ${NUM_RUNS} runs) on ${deviceType.toUpperCase()}`)");
+  emit('');
   const returnEntries = graph.outputs.map(
     (o) => `'${escapeSingleQuotes(o.name)}': result_${toJsVarName(o.name)}`
   );

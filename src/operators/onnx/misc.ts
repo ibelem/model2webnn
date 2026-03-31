@@ -351,7 +351,8 @@ function emitQDQ(node: NodeIR, emitter: CodeEmitter): void {
   let axis = (node.attributes.axis as number) ?? 1;
 
   // Get input shape to determine rank for reshaping.
-  const inputShape = emitter.tensorShape(node.inputs[0]);
+  // QDQ ops preserve shape, so fall back to output shape if input shape is unknown.
+  const inputShape = emitter.tensorShape(node.inputs[0]) ?? emitter.tensorShape(node.outputs[0]);
   const inputRank = inputShape ? inputShape.length : 0;
   if (axis < 0 && inputRank > 0) {
     axis = axis + inputRank;

@@ -151,7 +151,10 @@ async function run() {
     const weights = await WeightsFile.load('${weightsFileName}', '${manifestFileName}');
 
     statusEl.textContent = 'Building graph...';
+    const buildStart = performance.now();
     const graph = await buildGraph(context, weights);
+    const buildElapsed = (performance.now() - buildStart).toFixed(2);
+    console.log('Graph build: ' + buildElapsed + 'ms on ' + deviceType.toUpperCase());
 
     // Create input tensors
     const inputs = {};
@@ -187,8 +190,29 @@ async function run() {
     }
     const elapsed = (performance.now() - t0).toFixed(2);
 
+    // Benchmark: 50 runs
+    const NUM_RUNS = 50;
+    const runTimes = [];
+    for (let i = 0; i < NUM_RUNS; i++) {
+      const t0b = performance.now();
+      context.dispatch(graph, inputs, outputs);
+      for (const info of OUTPUT_INFO) {
+        await context.readTensor(outputs[info.name]);
+      }
+      runTimes.push(performance.now() - t0b);
+    }
+    const avgTime = (runTimes.reduce((a, b) => a + b, 0) / NUM_RUNS).toFixed(2);
+    const sorted = [...runTimes].sort((a, b) => a - b);
+    const medianTime = (NUM_RUNS % 2 ? sorted[NUM_RUNS >> 1] : (sorted[NUM_RUNS / 2 - 1] + sorted[NUM_RUNS / 2]) / 2).toFixed(2);
+    console.log('Inference: ' + avgTime + 'ms (average \u00b7 ' + NUM_RUNS + ' runs) on ' + deviceType.toUpperCase());
+    console.log('Inference: ' + medianTime + 'ms (median \u00b7 ' + NUM_RUNS + ' runs) on ' + deviceType.toUpperCase());
+
     statusEl.className = 'status success';
-    statusEl.textContent = 'Inference completed in ' + elapsed + 'ms on ' + deviceType.toUpperCase();
+    statusEl.style.whiteSpace = 'pre-line';
+    statusEl.textContent = 'Graph build: ' + buildElapsed + 'ms on ' + deviceType.toUpperCase()
+      + '\\nInference: ' + elapsed + 'ms (1 run) on ' + deviceType.toUpperCase()
+      + '\\nInference: ' + avgTime + 'ms (average \\u00b7 ' + NUM_RUNS + ' runs) on ' + deviceType.toUpperCase()
+      + '\\nInference: ' + medianTime + 'ms (median \\u00b7 ' + NUM_RUNS + ' runs) on ' + deviceType.toUpperCase();
 
     // Show results
     resultsCard.style.display = '';

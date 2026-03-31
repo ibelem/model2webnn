@@ -64,16 +64,18 @@ export function initPreview(result: ConvertResult): void {
   if (jsTab) jsTab.classList.add('active');
   showPanel('js');
 
-  // Initialize sub-modules
+  // Initialize sub-modules (reader/mapping don't attach to tab bar elements)
   initReader(result);
   initMapping(result);
-  initRunner(result);
 
   // Tab switching — use event delegation on the tab bar
   const tabBar = document.querySelector('.tab-bar')!;
   // Remove old listener by cloning
   const newTabBar = tabBar.cloneNode(true) as HTMLElement;
   tabBar.parentNode!.replaceChild(newTabBar, tabBar);
+
+  // Initialize runner AFTER tab bar clone so its event listeners survive
+  initRunner(result);
 
   newTabBar.addEventListener('click', (e) => {
     const target = (e.target as HTMLElement).closest('.tab') as HTMLElement | null;
@@ -103,10 +105,16 @@ export function initPreview(result: ConvertResult): void {
 
 function showPanel(tab: string): void {
   const editorContainer = document.getElementById('editorContainer')!;
+  const previewControls = document.getElementById('previewControls');
 
   // Hide all custom panels
   for (const id of Object.values(panelIds)) {
     document.getElementById(id)!.style.display = 'none';
+  }
+
+  // Show/hide preview controls in the tab bar
+  if (previewControls) {
+    previewControls.style.display = tab === 'preview' ? '' : 'none';
   }
 
   if (editorTabs.has(tab)) {

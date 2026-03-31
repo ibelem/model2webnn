@@ -448,7 +448,14 @@ main {
   gap: .25rem;
   background: var(--bg);
   padding: .5rem;
-  align-items: stretch;
+  align-items: center;
+}
+
+.tab-bar-right {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  margin-left: auto;
 }
 
 /* Expand/collapse toggle button */
@@ -933,16 +940,6 @@ footer a:hover {
   flex-direction: column;
 }
 
-.preview-toolbar {
-  display: flex;
-  align-items: center;
-  gap: .5rem;
-  padding: .5rem;
-  background: var(--bg);
-  border-bottom: 1px solid rgba(0, 0, 0, .06);
-  flex-shrink: 0;
-}
-
 .preview-device-select {
   width: auto;
   flex: none;
@@ -953,7 +950,11 @@ footer a:hover {
 .preview-status {
   font-size: .8rem;
   color: var(--text-muted);
-  margin-left: auto;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .preview-iframe {

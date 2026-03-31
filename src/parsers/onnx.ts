@@ -511,5 +511,42 @@ function propagateShapes(
       }
       continue;
     }
+
+    // Transpose: output shape = input shape permuted by perm attribute
+    if (node.opType === 'Transpose') {
+      const inputShape = shapes.get(node.inputs[0]);
+      if (!inputShape || inputShape.length === 0) continue;
+      const perm = node.attributes.perm as number[] | undefined;
+      let outShape: (number | string)[];
+      if (perm && perm.length === inputShape.length) {
+        outShape = perm.map(i => inputShape[i]);
+      } else {
+        // Default: reverse dimensions
+        outShape = [...inputShape].reverse();
+      }
+      for (const out of node.outputs) {
+        if (!out) continue;
+        const existing = shapes.get(out);
+        if (!existing) {
+          shapes.set(out, outShape);
+        } else if (!isFullyStatic(existing) && isFullyStatic(outShape)) {
+          shapes.set(out, outShape);
+        }
+      }
+      continue;
+    }
+
+    // Reshape: output shape from constant shape input
+    if (node.opType === 'Reshape') {
+      const shapeInput = node.inputs[1];
+      if (!shapeInput) continue;
+      const shapeFromMap = shapes.get(shapeInput);
+      // The shape tensor itself is a 1D constant; get its values from the constants.
+      // We can't easily read constant values here, but if the output already has
+      // shape info from value_info, that's used. This handles Flatten, which is
+      // shape-preserving in rank only — skip for now.
+      // However, if the output has shape info, prefer more concrete version.
+      continue;
+    }
   }
 }

@@ -117,6 +117,15 @@
           <div class="tab-group" data-label="Run">
             <button class="tab" data-tab="preview">Preview</button>
           </div>
+          <div class="tab-bar-right" id="previewControls" style="display:none">
+            <span class="preview-status" id="previewStatus"></span>
+            <select id="previewDevice" class="input preview-device-select">
+              <option value="cpu">CPU</option>
+              <option value="gpu">GPU</option>
+              <option value="npu">NPU</option>
+            </select>
+            <button class="btn btn-primary btn-sm" id="previewRunBtn">▶ Run</button>
+          </div>
         </div>
         <div id="editorContainer" class="editor-container"></div>
         <div id="readerPanel" class="panel" style="display:none">
@@ -150,15 +159,6 @@
           </div>
         </div>
         <div id="previewPanel" class="panel" style="display:none">
-          <div class="preview-toolbar">
-            <select id="previewDevice" class="input preview-device-select">
-              <option value="cpu">CPU</option>
-              <option value="gpu">GPU</option>
-              <option value="npu">NPU</option>
-            </select>
-            <button class="btn btn-primary btn-sm" id="previewRunBtn">▶ Run Inference</button>
-            <span class="preview-status" id="previewStatus"></span>
-          </div>
           <!-- sandbox: allow-scripts + allow-same-origin is required for navigator.ml (WebNN API).
                This combination can escape the sandbox, but is necessary for WebNN to function. -->
           <iframe id="previewFrame" class="preview-iframe" sandbox="allow-scripts allow-same-origin"></iframe>

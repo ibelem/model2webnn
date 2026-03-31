@@ -131,7 +131,7 @@ function runPreview(): void {
     statusEl.textContent = `Running on ${deviceType.toUpperCase()}...`;
     // After a timeout, update status (we can't easily get feedback from the iframe)
     setTimeout(() => {
-      statusEl.textContent = `Loaded (${deviceType.toUpperCase()}) — check iframe for results`;
+      statusEl.textContent = `Loaded (${deviceType.toUpperCase()})`;
     }, 2000);
   };
 }
