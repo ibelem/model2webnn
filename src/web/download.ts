@@ -13,6 +13,7 @@ export function initDownload(result: ConvertResult, modelName: string): void {
   document.getElementById('downloadJsBtn')!.onclick = downloadJs;
   document.getElementById('downloadHtmlBtn')!.onclick = downloadHtml;
   document.getElementById('downloadWeightsBtn')!.onclick = downloadWeights;
+  document.getElementById('downloadManifestBtn')!.onclick = downloadManifest;
 }
 
 function downloadBlob(blob: Blob, fileName: string): void {
@@ -42,6 +43,15 @@ function downloadWeights(): void {
   if (!downloadResult) return;
   const blob = new Blob([downloadResult.weights.buffer as ArrayBuffer], { type: 'application/octet-stream' });
   downloadBlob(blob, `${downloadModelName}.weights`);
+}
+
+function downloadManifest(): void {
+  if (!downloadResult) return;
+  const blob = new Blob(
+    [JSON.stringify(downloadResult.manifest, null, 2)],
+    { type: 'application/json' },
+  );
+  downloadBlob(blob, `${downloadModelName}.manifest.json`);
 }
 
 async function downloadAll(): Promise<void> {

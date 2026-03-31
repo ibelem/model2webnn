@@ -2,7 +2,7 @@
 // Converts .onnx / .tflite models into WebNN JavaScript/TypeScript code + WGWT weights.
 
 import type { GraphIR } from './ir/graph.js';
-import { applyFreeDimensionOverrides } from './ir/graph.js';
+import { applyFreeDimensionOverrides, getFreeDimensions, resolveRemainingDynamicDims } from './ir/graph.js';
 import { parseOnnx, type ExternalDataMap } from './parsers/onnx.js';
 import { parseTflite } from './parsers/tflite.js';
 import { packWeights } from './weights/packer.js';
@@ -53,6 +53,8 @@ export interface ConvertResult {
   graph: GraphIR;
   /** Operator coverage analysis — which ops are supported vs unsupported */
   coverage: OperatorCoverage;
+  /** Symbolic dimension names that were not overridden and defaulted to 1 */
+  unresolvedFreeDims: string[];
 }
 
 /**
@@ -97,6 +99,13 @@ export async function convert(
     applyFreeDimensionOverrides(graph, freeDimensionOverrides);
   }
 
+  // Capture unresolved free dims before they get defaulted to 1
+  const unresolvedFreeDims = getFreeDimensions(graph);
+
+  // WebNN requires all dimensions to be concrete unsigned long values.
+  // Default any remaining symbolic dimensions to 1.
+  resolveRemainingDynamicDims(graph);
+
   // Pack weights into WGWT format
   const packed = packWeights(graph.constants);
 
@@ -130,6 +139,7 @@ export async function convert(
     html,
     graph,
     coverage,
+    unresolvedFreeDims,
   };
 }
 
@@ -197,7 +207,7 @@ export function detectFormat(buffer: Uint8Array): 'onnx' | 'tflite' | 'unknown' 
 
 // Re-export types and utilities
 export type { GraphIR, TensorInfo, ConstantInfo, NodeIR, MLOperandDataType } from './ir/graph.js';
-export { getFreeDimensions, applyFreeDimensionOverrides } from './ir/graph.js';
+export { getFreeDimensions, applyFreeDimensionOverrides, resolveRemainingDynamicDims } from './ir/graph.js';
 export type { WeightsManifest, PackedWeights } from './weights/packer.js';
 export type { ExternalDataMap } from './parsers/onnx.js';
 export { parseOnnx, getExternalDataRefs } from './parsers/onnx.js';

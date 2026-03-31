@@ -24,6 +24,8 @@ function emitFullyConnected(node: NodeIR, emitter: CodeEmitter): void {
   // WebNN gemm requires rank-2 inputs. TFLite FULLY_CONNECTED accepts any rank
   // and implicitly flattens the input to 2D: [batch, features].
   const inputShape = emitter.tensorShape(node.inputs[0]);
+  const outputShape = emitter.tensorShape(node.outputs[0]);
+  let needsReshapeBack = false;
   if (inputShape && inputShape.length > 2) {
     // Flatten to [batch, rest] — batch is product of all dims except last
     const lastDim = inputShape[inputShape.length - 1];
@@ -33,6 +35,7 @@ function emitFullyConnected(node: NodeIR, emitter: CodeEmitter): void {
       const flatVar = `${output}_flat`;
       emitter.line(`const ${flatVar} = builder.reshape(${input}, [${batchDim}, ${lastDim}]);`);
       input = flatVar;
+      needsReshapeBack = !!(outputShape && outputShape.length > 2);
     }
   }
 
@@ -44,9 +47,18 @@ function emitFullyConnected(node: NodeIR, emitter: CodeEmitter): void {
     emitter.line(`const ${rawVar} = builder.gemm(${input}, ${weights}, { bTranspose: true });`);
   }
 
+  let resultVar = rawVar;
   const activation = node.attributes.fused_activation as string | undefined;
-  const resultVar = emitFusedActivation(rawVar, activation, emitter);
-  if (resultVar !== output) {
+  resultVar = emitFusedActivation(resultVar, activation, emitter);
+
+  // Reshape back to the expected output shape when input was flattened from >2D
+  if (needsReshapeBack && outputShape) {
+    const reshapeVar = resultVar === output ? `${output}_2d` : resultVar;
+    if (reshapeVar !== resultVar) {
+      emitter.line(`const ${reshapeVar} = ${resultVar};`);
+    }
+    emitter.line(`const ${output} = builder.reshape(${reshapeVar}, [${outputShape.join(', ')}]);`);
+  } else if (resultVar !== output) {
     emitter.line(`const ${output} = ${resultVar};`);
   }
 }

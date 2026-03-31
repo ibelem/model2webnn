@@ -96,49 +96,35 @@ export function emitDequantizeIfNeeded(
     return castVar;
   }
 
+  // Decompose dequantization into cast + sub + mul.
+  // WebNN dequantizeLinear requires scale/zeroPoint to have the same rank as input,
+  // but emitters may reshape tensors (e.g. gemm flattens to rank 2) making the
+  // model shape stale. Using cast + sub + mul with scalar/1-D constants avoids
+  // rank constraints via standard broadcasting.
+  // Formula: output = (cast(input, float32) - cast(zeroPoint, float32)) * scale
   emitter.comment(`Dequantize ${dtype} → float32`);
+  const castVar = `${prefix}_f32`;
   const scaleVar = `${prefix}_scale`;
-  const zpVar = `${prefix}_zp`;
   const dqVar = `${prefix}_dq`;
 
-  // WebNN spec: scale and zeroPoint must have the same rank as input.
-  // For per-tensor quantization (1 value), use all-ones shape matching input rank.
-  // For per-channel quantization (N values), place channel count on the last axis.
-  const inputShape = emitter.tensorShape(tensorName);
-  const inputRank = inputShape ? inputShape.length : 0;
+  emitter.line(`const ${castVar} = builder.cast(${varName}, 'float32');`);
 
-  let scaleShape: string;
-  let zpShape: string;
-  if (inputRank === 0) {
-    // Scalar input: scale and zp must also be scalars (rank 0)
-    scaleShape = '[]';
-    zpShape = '[]';
-  } else if (scaleValues.length === 1 && inputRank > 0) {
-    // Per-tensor: shape is [1, 1, ...] with same rank as input
-    const ones = new Array(inputRank).fill(1);
-    scaleShape = `[${ones.join(', ')}]`;
-    zpShape = scaleShape;
-  } else if (scaleValues.length > 1 && inputRank > 0) {
-    // Per-channel: channel dim gets the real size, remaining dims are 1
-    // TFLite per-channel quantization uses the last axis by convention
-    const dims = new Array(inputRank).fill(1);
-    dims[inputRank - 1] = scaleValues.length;
-    scaleShape = `[${dims.join(', ')}]`;
-    zpShape = scaleShape;
-  } else {
-    // Fallback: 1-D
-    scaleShape = `[${scaleValues.length}]`;
-    zpShape = scaleShape;
-  }
-
-  // Emit scale constant
+  // Scale constant — 1-D or scalar, broadcasting handles rank differences
+  const scaleShape = scaleValues.length === 1 ? '[]' : `[${scaleValues.length}]`;
   emitter.line(`const ${scaleVar} = builder.constant({dataType: 'float32', shape: ${scaleShape}}, new Float32Array([${scaleValues.join(', ')}]));`);
 
-  // Emit zero-point constant (must match input dtype and scale shape)
+  // Zero-point subtraction (skip if all zeros)
   const zpArr = zpValues ?? [0];
-  const zpType = dataTypeToArray[dtype] ?? 'Int8Array';
-  emitter.line(`const ${zpVar} = builder.constant({dataType: '${dtype}', shape: ${zpShape}}, new ${zpType}([${zpArr.join(', ')}]));`);
+  const allZerosZp = zpArr.every((v) => v === 0);
 
-  emitter.line(`const ${dqVar} = builder.dequantizeLinear(${varName}, ${scaleVar}, ${zpVar});`);
+  if (allZerosZp) {
+    emitter.line(`const ${dqVar} = builder.mul(${castVar}, ${scaleVar});`);
+  } else {
+    const zpConstVar = `${prefix}_zpf`;
+    const zpShape = zpArr.length === 1 ? '[]' : `[${zpArr.length}]`;
+    emitter.line(`const ${zpConstVar} = builder.constant({dataType: 'float32', shape: ${zpShape}}, new Float32Array([${zpArr.map((v) => v.toString()).join(', ')}]));`);
+    emitter.line(`const ${dqVar} = builder.mul(builder.sub(${castVar}, ${zpConstVar}), ${scaleVar});`);
+  }
+
   return dqVar;
 }

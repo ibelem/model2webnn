@@ -250,8 +250,50 @@ export async function parseOnnx(
     };
   });
 
-  // Parse nodes
-  const nodes: NodeIR[] = (graph.node ?? []).map((node) => {
+  // Extract ONNX Constant ops: these embed tensor data as an attribute and
+  // should be treated as constants, not graph operations.
+  // ORT handles these during graph preprocessing (PreprocessInitializers), not
+  // as runtime ops — there is no WebNN Constant op builder.
+  const constantNodeNames = new Set<string>();
+  for (const node of graph.node ?? []) {
+    if (node.opType !== 'Constant') continue;
+    const outputName = node.output?.[0] ?? '';
+    if (!outputName) continue;
+
+    // The "value" attribute is type TENSOR (attr.type === 4) stored in attr.t
+    const valueAttr = (node.attribute ?? []).find((a: any) => a.name === 'value');
+    if (valueAttr?.t) {
+      const tensor = valueAttr.t;
+      const rawData = extractTensorData(tensor, externalData);
+      constants.push({
+        name: outputName,
+        dataType: onnxDataType(tensor.dataType ?? 1),
+        shape: (tensor.dims ?? []).map((d: any) => toLong(d as number | Long)),
+        rawData,
+        byteLength: rawData.byteLength,
+      });
+      constantNodeNames.add(outputName);
+    } else {
+      // Handle value_int, value_float, value_ints, value_floats, value_string scalar attrs
+      const intAttr = (node.attribute ?? []).find((a: any) => a.name === 'value_int');
+      const floatAttr = (node.attribute ?? []).find((a: any) => a.name === 'value_float');
+      if (intAttr && intAttr.i != null) {
+        const val = BigInt(toLong(intAttr.i as number | Long));
+        const rawData = new Uint8Array(new BigInt64Array([val]).buffer);
+        constants.push({ name: outputName, dataType: 'int64', shape: [], rawData, byteLength: 8 });
+        constantNodeNames.add(outputName);
+      } else if (floatAttr && floatAttr.f != null) {
+        const rawData = new Uint8Array(new Float32Array([floatAttr.f]).buffer);
+        constants.push({ name: outputName, dataType: 'float32', shape: [], rawData, byteLength: 4 });
+        constantNodeNames.add(outputName);
+      }
+    }
+  }
+
+  // Parse nodes (exclude Constant ops — they've been extracted above)
+  const nodes: NodeIR[] = (graph.node ?? [])
+    .filter((node) => node.opType !== 'Constant')
+    .map((node) => {
     const attributes: Record<string, unknown> = {};
     for (const attr of node.attribute ?? []) {
       const value = parseAttribute(attr);

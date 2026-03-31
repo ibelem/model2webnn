@@ -47,8 +47,8 @@ function ensureBlobUrls(): boolean {
 function runPreview(): void {
   if (!currentResult || !ensureBlobUrls()) return;
 
-  // Check for unresolved free dimensions
-  const freeDims = getUnresolvedFreeDims(currentResult);
+  // Check for unresolved free dimensions (captured before they were defaulted to 1)
+  const freeDims = currentResult.unresolvedFreeDims;
   if (freeDims.length > 0) {
     const dimList = freeDims.join(', ');
     const proceed = confirm(
@@ -138,15 +138,4 @@ function runPreview(): void {
 
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-/** Collect unique unresolved (string) dimension names from model inputs and outputs */
-function getUnresolvedFreeDims(result: ConvertResult): string[] {
-  const dims = new Set<string>();
-  for (const t of [...result.graph.inputs, ...result.graph.outputs]) {
-    for (const d of t.shape) {
-      if (typeof d === 'string') dims.add(d);
-    }
-  }
-  return [...dims];
 }

@@ -160,11 +160,23 @@ function emitArgMaxMin(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
   const output = emitter.declare(node.outputs[0]);
   const webnnOp = node.opType === 'ArgMax' ? 'argMax' : 'argMin';
-  const axis = (node.attributes.axis as number) ?? 0;
+  let axis = (node.attributes.axis as number) ?? 0;
   const keepdims = (node.attributes.keepdims as number) ?? 1;
+
+  // WebNN axis is unsigned long — normalize negative values
+  if (axis < 0) {
+    const inputShape = emitter.tensorShape(node.inputs[0]);
+    if (inputShape) axis += inputShape.length;
+  }
 
   const opts: string[] = [];
   if (!keepdims) opts.push(`keepDimensions: false`);
+  // ONNX ArgMax/ArgMin output int64 by default; WebNN defaults to int32.
+  // Match the model's declared output type.
+  const outputDtype = emitter.tensorDataType(node.outputs[0]);
+  if (outputDtype && outputDtype !== 'int32') {
+    opts.push(`outputDataType: '${outputDtype}'`);
+  }
 
   const optsStr = opts.length > 0 ? `, { ${opts.join(', ')} }` : '';
   emitter.line(`const ${output} = builder.${webnnOp}(${input}, ${axis}${optsStr});`);
@@ -283,46 +295,88 @@ function emitQDQ(node: NodeIR, emitter: CodeEmitter): void {
   const hasZeroPoint = node.inputs.length > 2 && node.inputs[2] !== '';
   const webnnOp = node.opType === 'DequantizeLinear' ? 'dequantizeLinear' : 'quantizeLinear';
 
-  // ORT qdq_op_builder.cc: For per-tensor quantization (scalar scale),
-  // WebNN requires scale and zeroPoint to have the same rank as input.
-  // For per-axis quantization with axis != last, scale must be reshaped for broadcasting.
-  // We handle this by checking if the scale is a scalar constant or per-axis.
   const blockSize = (node.attributes.block_size as number) ?? 0;
+  let axis = (node.attributes.axis as number) ?? 1;
 
-  // Determine if we need to reshape scale for broadcasting.
-  // If scale is a scalar constant, reshape it to match input rank.
-  // If scale is per-axis and axis != last, reshape for broadcasting.
+  // Get input shape to determine rank for reshaping.
+  const inputShape = emitter.tensorShape(node.inputs[0]);
+  const inputRank = inputShape ? inputShape.length : 0;
+  if (axis < 0 && inputRank > 0) {
+    axis = axis + inputRank;
+  }
+
+  // ORT qdq_op_builder.cc: WebNN requires scale and zeroPoint to have the same rank as input.
+  // For per-tensor quantization (scalar scale), reshape to [1,1,...,1].
+  // For per-axis quantization with axis != last, reshape to [1,...,N,...,1].
   let scaleRef = scale;
-  let zpRef: string;
+  let zpRef: string | undefined;
+  let zpShape: string | undefined; // track shape for synthesized zeroPoint
 
-  if (emitter.isConstant(node.inputs[1])) {
-    const scaleShape = emitter.constantShape(node.inputs[1]);
+  const scaleShape = emitter.isConstant(node.inputs[1]) ? emitter.constantShape(node.inputs[1]) : null;
+  const scaleShapeFromGraph = emitter.tensorShape(node.inputs[1]);
+  const effectiveScaleRank = scaleShape ? scaleShape.length : (scaleShapeFromGraph ? scaleShapeFromGraph.length : -1);
 
-    if (scaleShape.length === 0) {
-      // Scalar scale — no reshaping needed, WebNN handles scalar broadcasting
-      scaleRef = scale;
-    } else if (scaleShape.length === 1 && blockSize === 0) {
-      // Per-axis quantization: if axis is specified and not last dim,
-      // we may need to let WebNN handle the broadcasting via the scale shape.
-      // The ORT builder reshapes scale to [1,...,scaleSize,...,1] for broadcasting.
-      // However, since we don't know input rank at codegen time, we emit the scale as-is
-      // and let WebNN handle it (WebNN spec does unidirectional broadcasting).
-      scaleRef = scale;
+  if (effectiveScaleRank === 0 && inputRank > 0) {
+    // Scalar scale — reshape to all-ones shape matching input rank.
+    const targetShape = Array(inputRank).fill(1);
+    scaleRef = `${output}_scale_reshaped`;
+    emitter.line(`const ${scaleRef} = builder.reshape(${scale}, [${targetShape.join(', ')}]);`);
+    zpShape = `[${targetShape.join(', ')}]`;
+
+    if (hasZeroPoint) {
+      zpRef = `${output}_zp_reshaped`;
+      emitter.line(`const ${zpRef} = builder.reshape(${emitter.ref(node.inputs[2])}, [${targetShape.join(', ')}]);`);
+    }
+  } else if (effectiveScaleRank === 1 && inputRank > 1 &&
+             blockSize === 0 && axis !== inputRank - 1) {
+    // Per-axis quantization: reshape scale to [1,...,scaleSize,...,1] for broadcasting.
+    const scaleSize = scaleShape ? scaleShape[0] : (scaleShapeFromGraph ? scaleShapeFromGraph[0] : null);
+    if (scaleSize !== null) {
+      const targetShape = Array(inputRank).fill(1);
+      targetShape[axis] = scaleSize;
+      scaleRef = `${output}_scale_reshaped`;
+      emitter.line(`const ${scaleRef} = builder.reshape(${scale}, [${targetShape.join(', ')}]);`);
+      zpShape = `[${targetShape.join(', ')}]`;
+
+      if (hasZeroPoint) {
+        zpRef = `${output}_zp_reshaped`;
+        emitter.line(`const ${zpRef} = builder.reshape(${emitter.ref(node.inputs[2])}, [${targetShape.join(', ')}]);`);
+      }
     }
   }
 
-  if (hasZeroPoint) {
+  if (hasZeroPoint && !zpRef) {
     zpRef = emitter.ref(node.inputs[2]);
-  } else {
-    // ORT: Create a zero constant with matching type.
+  }
+
+  if (!hasZeroPoint) {
+    // ORT: Create a zero constant with matching type and same shape as (reshaped) scale.
     // DequantizeLinear: zeroPoint type matches input type
     // QuantizeLinear: zeroPoint type matches output type
-    // Use uint8 as default (most common for quantized models)
+    const inputDtype = emitter.tensorDataType(node.inputs[0]);
+    const outputDtype = emitter.tensorDataType(node.outputs[0]);
+    const zpType = node.opType === 'DequantizeLinear' ? (inputDtype ?? 'uint8') : (outputDtype ?? 'uint8');
+    const arrayType = dataTypeToTypedArray(zpType);
+    const shape = zpShape ?? (scaleShape ? `[${scaleShape.join(', ')}]` : '[]');
     zpRef = `${output}_zp`;
-    emitter.line(`const ${zpRef} = builder.constant({dataType: 'uint8', shape: []}, new Uint8Array([0]));`);
+    emitter.line(`const ${zpRef} = builder.constant({dataType: '${zpType}', shape: ${shape}}, new ${arrayType}([0]));`);
   }
 
   emitter.line(`const ${output} = builder.${webnnOp}(${input}, ${scaleRef}, ${zpRef});`);
+}
+
+function dataTypeToTypedArray(dt: string): string {
+  switch (dt) {
+    case 'float32': return 'Float32Array';
+    case 'float16': return 'Float16Array';
+    case 'int8': return 'Int8Array';
+    case 'uint8': return 'Uint8Array';
+    case 'int32': return 'Int32Array';
+    case 'uint32': return 'Uint32Array';
+    case 'int64': return 'BigInt64Array';
+    case 'uint64': return 'BigUint64Array';
+    default: return 'Uint8Array';
+  }
 }
 
 registerOnnxOp('Resize', emitResize);
@@ -429,8 +483,23 @@ function emitDynamicQuantizeLinear(node: NodeIR, emitter: CodeEmitter): void {
   const zp = `${y}_zp`;
   emitter.line(`const ${zp} = builder.cast(${roundedZp}, 'uint8');`);
 
+  // ORT: WebNN quantizeLinear requires scale and zeroPoint to have the same rank as input.
+  // The scale and zeroPoint are scalar (from reduceMin/reduceMax), so reshape to [1,1,...,1].
+  const inputShape = emitter.tensorShape(node.inputs[0]);
+  const inputRank = inputShape ? inputShape.length : 0;
+  let scaleForQL = scale;
+  let zpForQL = zp;
+  if (inputRank > 0) {
+    const targetShape = Array(inputRank).fill(1);
+    scaleForQL = `${y}_scale_reshaped`;
+    emitter.line(`const ${scaleForQL} = builder.reshape(${scale}, [${targetShape.join(', ')}]);`);
+    zpForQL = `${y}_zp_reshaped`;
+    emitter.line(`const ${zpForQL} = builder.reshape(${zp}, [${targetShape.join(', ')}]);`);
+  }
+
   // y = quantizeLinear(x, scale, zeroPoint)
-  emitter.line(`const ${y} = builder.quantizeLinear(${input}, ${scale}, ${zp});`);
+  emitter.line(`const ${y} = builder.quantizeLinear(${input}, ${scaleForQL}, ${zpForQL});`);
+  // Output the original (non-reshaped) scale and zeroPoint as the DynamicQuantizeLinear outputs
   if (yScale) emitter.line(`const ${yScale} = ${scale};`);
   if (yZp) emitter.line(`const ${yZp} = ${zp};`);
 }

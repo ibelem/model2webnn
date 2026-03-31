@@ -10,14 +10,18 @@ function emitSoftmax(node: NodeIR, emitter: CodeEmitter): void {
   const output = emitter.declare(node.outputs[0]);
   input = emitDequantizeIfNeeded(input, node.inputs[0], 0, node, emitter, `${output}_in`);
   // TFLite softmax always operates on last axis
-  emitter.line(`const ${output} = builder.softmax(${input});`);
+  const inputShape = emitter.tensorShape(node.inputs[0]);
+  const axis = inputShape ? inputShape.length - 1 : 1;
+  emitter.line(`const ${output} = builder.softmax(${input}, ${axis});`);
 }
 
 function emitLogSoftmax(node: NodeIR, emitter: CodeEmitter): void {
   let input = emitter.ref(node.inputs[0]);
   const output = emitter.declare(node.outputs[0]);
   input = emitDequantizeIfNeeded(input, node.inputs[0], 0, node, emitter, `${output}_in`);
-  emitter.line(`const ${output} = builder.log(builder.softmax(${input}));`);
+  const inputShape = emitter.tensorShape(node.inputs[0]);
+  const axis = inputShape ? inputShape.length - 1 : 1;
+  emitter.line(`const ${output} = builder.log(builder.softmax(${input}, ${axis}));`);
 }
 
 function emitL2Normalization(node: NodeIR, emitter: CodeEmitter): void {

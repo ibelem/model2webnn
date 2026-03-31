@@ -10,6 +10,7 @@ function emitConv(node: NodeIR, emitter: CodeEmitter): void {
   const weight = emitter.ref(node.inputs[1]);
   const output = emitter.declare(node.outputs[0]);
 
+  const isConvInteger = node.opType === 'ConvInteger';
   const isTranspose = node.opType === 'ConvTranspose';
   const webnnOp = isTranspose ? 'convTranspose2d' : 'conv2d';
 
@@ -89,15 +90,82 @@ function emitConv(node: NodeIR, emitter: CodeEmitter): void {
     }
   }
 
-  // Bias (optional 3rd input)
-  const hasBias = node.inputs.length > 2 && node.inputs[2] !== '';
-  if (hasBias) {
-    const bias = emitter.ref(node.inputs[2]);
-    opts.push(`bias: ${bias}`);
+  // Bias (optional 3rd input) — ConvInteger uses input[2] as x_zero_point, not bias
+  if (!isConvInteger) {
+    const hasBias = node.inputs.length > 2 && node.inputs[2] !== '';
+    if (hasBias) {
+      const bias = emitter.ref(node.inputs[2]);
+      opts.push(`bias: ${bias}`);
+    }
   }
 
   const optsStr = opts.length > 0 ? `, { ${opts.join(', ')} }` : '';
-  emitter.line(`const ${output} = builder.${webnnOp}(${input}, ${weight}${optsStr});`);
+
+  if (isConvInteger) {
+    // ORT conv_op_builder.cc: ConvInteger decomposes to dequantizeLinear → conv2d → cast(int32)
+    // WebNN conv2d only supports float32/float16 inputs, so we need to dequantize first.
+    const inputShape = emitter.tensorShape(node.inputs[0]);
+    const inputRank = inputShape ? inputShape.length : 4;
+    const targetShape = Array(inputRank).fill(1);
+    const shapeStr = `[${targetShape.join(', ')}]`;
+
+    // Dequantize x: dequantizeLinear(x, scale=1.0, x_zero_point)
+    // x_zero_point is input[2] (optional), reshape to match input rank
+    let xZpRef: string;
+    const hasXZp = node.inputs.length > 2 && node.inputs[2] !== '';
+    if (hasXZp) {
+      const xZpRaw = emitter.ref(node.inputs[2]);
+      xZpRef = `${output}_x_zp_reshaped`;
+      emitter.line(`const ${xZpRef} = builder.reshape(${xZpRaw}, ${shapeStr});`);
+    } else {
+      const inputDtype = emitter.tensorDataType(node.inputs[0]) ?? 'uint8';
+      const arrayType = inputDtype === 'int8' ? 'Int8Array' : 'Uint8Array';
+      xZpRef = `${output}_x_zp`;
+      emitter.line(`const ${xZpRef} = builder.constant({dataType: '${inputDtype}', shape: ${shapeStr}}, new ${arrayType}([0]));`);
+    }
+    const xScaleRef = `${output}_x_scale`;
+    emitter.line(`const ${xScaleRef} = builder.constant({dataType: 'float32', shape: ${shapeStr}}, new Float32Array([1]));`);
+    const dequantX = `${output}_dequant_x`;
+    emitter.line(`const ${dequantX} = builder.dequantizeLinear(${input}, ${xScaleRef}, ${xZpRef});`);
+
+    // Dequantize w: dequantizeLinear(w, scale=1.0, w_zero_point)
+    // w_zero_point is input[3] (optional)
+    const weightShape = emitter.tensorShape(node.inputs[1]);
+    const weightRank = weightShape ? weightShape.length : inputRank;
+    const wTargetShape = Array(weightRank).fill(1);
+    let wZpRef: string;
+    const hasWZp = node.inputs.length > 3 && node.inputs[3] !== '';
+    if (hasWZp) {
+      const wZpRaw = emitter.ref(node.inputs[3]);
+      // Per-channel w_zero_point: if 1-D, reshape to [1, C_out, 1, 1]
+      const wZpShape = emitter.isConstant(node.inputs[3]) ? emitter.constantShape(node.inputs[3]) : null;
+      const wZpGraphShape = emitter.tensorShape(node.inputs[3]);
+      const wZpRank = wZpShape ? wZpShape.length : (wZpGraphShape ? wZpGraphShape.length : 0);
+      if (wZpRank === 1 && weightShape && typeof weightShape[0] === 'number') {
+        wTargetShape[1] = weightShape[0]; // C_out is dim 0 of OIHW weight
+      }
+      wZpRef = `${output}_w_zp_reshaped`;
+      emitter.line(`const ${wZpRef} = builder.reshape(${wZpRaw}, [${wTargetShape.join(', ')}]);`);
+    } else {
+      const inputDtype = emitter.tensorDataType(node.inputs[0]) ?? 'uint8';
+      const arrayType = inputDtype === 'int8' ? 'Int8Array' : 'Uint8Array';
+      wZpRef = `${output}_w_zp`;
+      emitter.line(`const ${wZpRef} = builder.constant({dataType: '${inputDtype}', shape: [${wTargetShape.join(', ')}]}, new ${arrayType}([0]));`);
+    }
+    const wScaleRef = `${output}_w_scale`;
+    emitter.line(`const ${wScaleRef} = builder.constant({dataType: 'float32', shape: [${wTargetShape.join(', ')}]}, new Float32Array([1]));`);
+    const dequantW = `${output}_dequant_w`;
+    emitter.line(`const ${dequantW} = builder.dequantizeLinear(${weight}, ${wScaleRef}, ${wZpRef});`);
+
+    // Conv2d with float32 inputs
+    const convOut = `${output}_conv`;
+    emitter.line(`const ${convOut} = builder.${webnnOp}(${dequantX}, ${dequantW}${optsStr});`);
+
+    // Cast output to int32
+    emitter.line(`const ${output} = builder.cast(${convOut}, 'int32');`);
+  } else {
+    emitter.line(`const ${output} = builder.${webnnOp}(${input}, ${weight}${optsStr});`);
+  }
 }
 
 registerOnnxOps(['Conv', 'ConvInteger', 'ConvTranspose'], emitConv);

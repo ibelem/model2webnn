@@ -57,21 +57,50 @@ function emitSqueeze(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
   const output = emitter.declare(node.outputs[0]);
 
-  const squeezeDims = node.attributes.squeeze_dims as number[] | undefined;
-  if (squeezeDims && squeezeDims.length > 0) {
-    emitter.line(`const ${output} = builder.reshape(${input}, /* squeeze dims: [${squeezeDims}] */);`);
+  // WebNN has no squeeze — use reshape with the known output shape
+  const outShape = emitter.tensorShape(node.outputs[0]);
+  if (outShape) {
+    emitter.line(`const ${output} = builder.reshape(${input}, [${outShape.join(', ')}]);`);
   } else {
-    emitter.line(`const ${output} = builder.squeeze(${input});`);
+    // Fallback: compute from squeeze_dims attribute
+    const squeezeDims = node.attributes.squeeze_dims as number[] | undefined;
+    const inShape = emitter.tensorShape(node.inputs[0]);
+    if (inShape && squeezeDims && squeezeDims.length > 0) {
+      const dimSet = new Set(squeezeDims);
+      const newShape = inShape.filter((_, i) => !dimSet.has(i));
+      emitter.line(`const ${output} = builder.reshape(${input}, [${newShape.join(', ')}]);`);
+    } else if (inShape) {
+      const newShape = inShape.filter((d) => d !== 1);
+      emitter.line(`const ${output} = builder.reshape(${input}, [${newShape.join(', ')}]);`);
+    } else {
+      emitter.comment('WARNING: unknown shape for squeeze');
+      emitter.line(`const ${output} = ${input};`);
+    }
   }
 }
 
 function emitExpandDims(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
   const output = emitter.declare(node.outputs[0]);
-  // axis comes from the second input tensor (scalar constant int32)
-  const axisValues = node.inputs.length > 1 ? emitter.constantIntValues(node.inputs[1]) : null;
-  const axis = axisValues ? axisValues[0] : 0;
-  emitter.line(`const ${output} = builder.unsqueeze(${input}, { axes: [${axis}] });`);
+
+  // WebNN has no unsqueeze — use reshape with the known output shape
+  const outShape = emitter.tensorShape(node.outputs[0]);
+  if (outShape) {
+    emitter.line(`const ${output} = builder.reshape(${input}, [${outShape.join(', ')}]);`);
+  } else {
+    // Fallback: insert a dim-1 at the specified axis
+    const axisValues = node.inputs.length > 1 ? emitter.constantIntValues(node.inputs[1]) : null;
+    const axis = axisValues ? axisValues[0] : 0;
+    const inShape = emitter.tensorShape(node.inputs[0]);
+    if (inShape) {
+      const newShape = [...inShape];
+      newShape.splice(axis < 0 ? inShape.length + 1 + axis : axis, 0, 1);
+      emitter.line(`const ${output} = builder.reshape(${input}, [${newShape.join(', ')}]);`);
+    } else {
+      emitter.comment('WARNING: unknown shape for expand_dims');
+      emitter.line(`const ${output} = ${input};`);
+    }
+  }
 }
 
 function emitTranspose(node: NodeIR, emitter: CodeEmitter): void {
@@ -94,8 +123,12 @@ function emitTranspose(node: NodeIR, emitter: CodeEmitter): void {
 function emitConcatenation(node: NodeIR, emitter: CodeEmitter): void {
   const inputs = node.inputs.map((n) => emitter.ref(n));
   const output = emitter.declare(node.outputs[0]);
-  const axis = (node.attributes.axis as number) ?? 0;
-
+  let axis = (node.attributes.axis as number) ?? 0;
+  // WebNN concat axis is unsigned long — normalize negative values
+  if (axis < 0) {
+    const inputShape = emitter.tensorShape(node.inputs[0]);
+    if (inputShape) axis += inputShape.length;
+  }
   emitter.line(`const ${output} = builder.concat([${inputs.join(', ')}], ${axis});`);
 }
 
@@ -107,7 +140,12 @@ function emitSplit(node: NodeIR, emitter: CodeEmitter): void {
 
   // Axis is a scalar constant int32 tensor
   const axisValues = emitter.constantIntValues(node.inputs[0]);
-  const axis = axisValues ? axisValues[0] : 0;
+  let axis = axisValues ? axisValues[0] : 0;
+  // WebNN split axis is unsigned long — normalize negative values
+  if (axis < 0) {
+    const dataShape = emitter.tensorShape(node.inputs[1]);
+    if (dataShape) axis += dataShape.length;
+  }
 
   emitter.comment(`SPLIT into ${numSplits} parts along axis ${axis}`);
 
@@ -122,11 +160,36 @@ function emitSplitV(node: NodeIR, emitter: CodeEmitter): void {
   // TFLite SPLIT_V: input(0) = data, input(1) = size_splits, input(2) = axis
   const data = emitter.ref(node.inputs[0]);
 
-  emitter.comment(`SPLIT_V into ${node.outputs.length} parts`);
+  // Read axis from third input (constant int32 scalar)
+  let axis = 0;
+  if (node.inputs.length > 2) {
+    const axisValues = emitter.constantIntValues(node.inputs[2]);
+    if (axisValues) {
+      axis = axisValues[0];
+      if (axis < 0) {
+        const dataShape = emitter.tensorShape(node.inputs[0]);
+        if (dataShape) axis += dataShape.length;
+      }
+    }
+  }
 
-  for (let i = 0; i < node.outputs.length; i++) {
-    const out = emitter.declare(node.outputs[i]);
-    emitter.line(`const ${out} = builder.split(${data}, ${node.outputs.length})[${i}]; // SPLIT_V`);
+  // Read size_splits from second input (constant int32 tensor)
+  const sizeSplits = emitter.constantIntValues(node.inputs[1]);
+
+  emitter.comment(`SPLIT_V into ${node.outputs.length} parts along axis ${axis}`);
+
+  if (sizeSplits && sizeSplits.length === node.outputs.length) {
+    // Use explicit sizes with WebNN split(input, splits_as_array, {axis})
+    for (let i = 0; i < node.outputs.length; i++) {
+      const out = emitter.declare(node.outputs[i]);
+      emitter.line(`const ${out} = builder.split(${data}, [${sizeSplits}], { axis: ${axis} })[${i}];`);
+    }
+  } else {
+    // Fallback: equal split
+    for (let i = 0; i < node.outputs.length; i++) {
+      const out = emitter.declare(node.outputs[i]);
+      emitter.line(`const ${out} = builder.split(${data}, ${node.outputs.length}, { axis: ${axis} })[${i}];`);
+    }
   }
 }
 
@@ -134,11 +197,21 @@ function emitSlice(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
   const output = emitter.declare(node.outputs[0]);
   // TFLite SLICE: inputs are data, begin, size — these are constant int32 tensors
+  // Size value of -1 means "to the end" of that dimension
+  // WebNN slice requires positive unsigned long sizes
   if (node.inputs.length >= 3) {
     const beginVals = emitter.constantIntValues(node.inputs[1]);
     const sizeVals = emitter.constantIntValues(node.inputs[2]);
     if (beginVals && sizeVals) {
-      emitter.line(`const ${output} = builder.slice(${input}, [${beginVals}], [${sizeVals}]);`);
+      // Resolve -1 sizes using input shape
+      const resolvedSizes = [...sizeVals];
+      const inputShape = emitter.tensorShape(node.inputs[0]);
+      for (let i = 0; i < resolvedSizes.length; i++) {
+        if (resolvedSizes[i] === -1 && inputShape && typeof inputShape[i] === 'number') {
+          resolvedSizes[i] = (inputShape[i] as number) - beginVals[i];
+        }
+      }
+      emitter.line(`const ${output} = builder.slice(${input}, [${beginVals}], [${resolvedSizes}]);`);
     } else {
       // Fallback for non-constant begin/size
       const begin = emitter.ref(node.inputs[1]);
@@ -321,8 +394,12 @@ function emitGather(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
   const indices = emitter.ref(node.inputs[1]);
   const output = emitter.declare(node.outputs[0]);
-  const axis = (node.attributes.axis as number) ?? 0;
-
+  let axis = (node.attributes.axis as number) ?? 0;
+  // WebNN gather axis is unsigned long — normalize negative values
+  if (axis < 0) {
+    const inputShape = emitter.tensorShape(node.inputs[0]);
+    if (inputShape) axis += inputShape.length;
+  }
   emitter.line(`const ${output} = builder.gather(${input}, ${indices}, { axis: ${axis} });`);
 }
 
@@ -352,13 +429,26 @@ function emitShape(node: NodeIR, emitter: CodeEmitter): void {
 function emitPack(node: NodeIR, emitter: CodeEmitter): void {
   const inputs = node.inputs.map((n) => emitter.ref(n));
   const output = emitter.declare(node.outputs[0]);
-  const axis = (node.attributes.axis as number) ?? 0;
+  let axis = (node.attributes.axis as number) ?? 0;
+
+  // WebNN concat axis is unsigned long — normalize negative values
+  const inShape = emitter.tensorShape(node.inputs[0]);
+  if (axis < 0 && inShape) {
+    axis += inShape.length + 1; // pack inserts a dim, so rank+1
+  }
 
   emitter.comment(`PACK along axis ${axis}`);
-  // Pack = stack = unsqueeze each input + concat
+  // Pack = stack = reshape each input to add dim at axis, then concat
   const unsqueezed = inputs.map((inp, i) => {
     const uName = `${output}_u${i}`;
-    emitter.line(`const ${uName} = builder.unsqueeze(${inp}, { axes: [${axis}] });`);
+    if (inShape) {
+      const newShape = [...inShape];
+      newShape.splice(axis, 0, 1);
+      emitter.line(`const ${uName} = builder.reshape(${inp}, [${newShape.join(', ')}]);`);
+    } else {
+      emitter.comment('WARNING: unknown shape for pack unsqueeze');
+      emitter.line(`const ${uName} = ${inp};`);
+    }
     return uName;
   });
   emitter.line(`const ${output} = builder.concat([${unsqueezed.join(', ')}], ${axis});`);
@@ -366,13 +456,25 @@ function emitPack(node: NodeIR, emitter: CodeEmitter): void {
 
 function emitUnpack(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
-  const axis = (node.attributes.axis as number) ?? 0;
+  let axis = (node.attributes.axis as number) ?? 0;
   const num = (node.attributes.num as number) ?? node.outputs.length;
 
+  // WebNN split axis is unsigned long — normalize negative values
+  if (axis < 0) {
+    const inputShape = emitter.tensorShape(node.inputs[0]);
+    if (inputShape) axis += inputShape.length;
+  }
+
   emitter.comment(`UNPACK along axis ${axis}`);
+  const outShape = emitter.tensorShape(node.outputs[0]);
   for (let i = 0; i < node.outputs.length; i++) {
     const out = emitter.declare(node.outputs[i]);
-    emitter.line(`const ${out} = builder.squeeze(builder.split(${input}, ${num}, { axis: ${axis} })[${i}], { axes: [${axis}] });`);
+    if (outShape) {
+      emitter.line(`const ${out} = builder.reshape(builder.split(${input}, ${num}, { axis: ${axis} })[${i}], [${outShape.join(', ')}]);`);
+    } else {
+      // Fallback: split without squeeze
+      emitter.line(`const ${out} = builder.split(${input}, ${num}, { axis: ${axis} })[${i}];`);
+    }
   }
 }
 

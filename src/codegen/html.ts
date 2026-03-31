@@ -3,7 +3,7 @@
 
 import type { GraphIR } from '../ir/graph.js';
 import { getTypedArrayName } from '../ir/graph.js';
-import { generateJavaScriptFixed } from './javascript.js';
+import { generateJavaScriptFixed, computeEffectiveOutputTypes, computeEffectiveOutputs } from './javascript.js';
 
 export interface GenerateHtmlOptions {
   weightsFileName?: string;
@@ -38,13 +38,16 @@ export function generateHtml(
     );
   }
 
+  const effectiveOutputs = computeEffectiveOutputs(graph);
+  const effectiveOutputTypes = computeEffectiveOutputTypes(graph);
   const outputInfoLines: string[] = [];
-  for (const output of graph.outputs) {
-    const typedArray = getTypedArrayName(output.dataType);
+  for (const output of effectiveOutputs) {
+    const dt = effectiveOutputTypes.get(output.name) ?? output.dataType;
+    const typedArray = getTypedArrayName(dt);
     const numericShape = output.shape.map((d) => (typeof d === 'number' ? d : 1));
     const totalSize = numericShape.reduce((a, b) => a * b, 1);
     outputInfoLines.push(
-      `    { name: '${escapeSingleQuotes(output.name)}', dataType: '${output.dataType}', shape: ${JSON.stringify(output.shape)}, TypedArray: ${typedArray}, size: ${totalSize} },`,
+      `    { name: '${escapeSingleQuotes(output.name)}', dataType: '${dt}', shape: ${JSON.stringify(output.shape)}, TypedArray: ${typedArray}, size: ${totalSize} },`,
     );
   }
 
@@ -104,7 +107,7 @@ ${graph.inputs.map((i) => `        <tr><td>${escapeHtml(i.name)}</td><td>${JSON.
       </table>
       <table style="margin-top: 1rem;">
         <tr><th>Outputs</th><th>Shape</th><th>Data Type</th></tr>
-${graph.outputs.map((o) => `        <tr><td>${escapeHtml(o.name)}</td><td>${JSON.stringify(o.shape)}</td><td>${o.dataType}</td></tr>`).join('\n')}
+${effectiveOutputs.map((o) => `        <tr><td>${escapeHtml(o.name)}</td><td>${JSON.stringify(o.shape)}</td><td>${o.dataType}</td></tr>`).join('\n')}
       </table>
     </div>
 

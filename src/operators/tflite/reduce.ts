@@ -27,9 +27,15 @@ function emitReduce(node: NodeIR, emitter: CodeEmitter): void {
 
   // Axes come from the second input tensor (a constant int32 tensor)
   // WebNN expects axes as a plain JS array, not an MLOperand
+  // Negative axes must be normalized — WebNN axes are unsigned long
   if (node.inputs.length > 1) {
-    const axesValues = emitter.constantIntValues(node.inputs[1]);
+    let axesValues = emitter.constantIntValues(node.inputs[1]);
     if (axesValues) {
+      const inputShape = emitter.tensorShape(node.inputs[0]);
+      if (inputShape) {
+        const rank = inputShape.length;
+        axesValues = axesValues.map(a => a < 0 ? a + rank : a);
+      }
       emitter.line(`const ${output} = builder.${webnnOp}(${input}, { axes: [${axesValues}], keepDimensions: ${keepDims} });`);
     } else {
       // Fallback: reduce over all axes

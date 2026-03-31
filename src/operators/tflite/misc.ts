@@ -5,7 +5,6 @@
 import type { NodeIR } from '../../ir/graph.js';
 import type { CodeEmitter } from '../registry.js';
 import { registerTfliteOp } from '../registry.js';
-import { dataTypeToArray } from './common.js';
 
 function emitCast(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
@@ -17,31 +16,72 @@ function emitCast(node: NodeIR, emitter: CodeEmitter): void {
 function emitArgMax(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
   const output = emitter.declare(node.outputs[0]);
-  emitter.line(`const ${output} = builder.argMax(${input}, { keepDimensions: true });`);
+  // TFLite ARG_MAX: inputs[1] is the axis (constant int32 scalar)
+  // WebNN argMax(input, axis, options?) — axis is required unsigned long
+  let axis = 0;
+  if (node.inputs.length > 1) {
+    const axisValues = emitter.constantIntValues(node.inputs[1]);
+    if (axisValues) {
+      axis = axisValues[0];
+      if (axis < 0) {
+        const inputShape = emitter.tensorShape(node.inputs[0]);
+        if (inputShape) axis += inputShape.length;
+      }
+    }
+  }
+  const keepDims = (node.attributes.keep_dims as boolean) ?? true;
+  emitter.line(`const ${output} = builder.argMax(${input}, ${axis}${keepDims ? '' : ', { keepDimensions: false }'});`);
 }
 
 function emitArgMin(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
   const output = emitter.declare(node.outputs[0]);
-  emitter.line(`const ${output} = builder.argMin(${input}, { keepDimensions: true });`);
+  // TFLite ARG_MIN: inputs[1] is the axis (constant int32 scalar)
+  let axis = 0;
+  if (node.inputs.length > 1) {
+    const axisValues = emitter.constantIntValues(node.inputs[1]);
+    if (axisValues) {
+      axis = axisValues[0];
+      if (axis < 0) {
+        const inputShape = emitter.tensorShape(node.inputs[0]);
+        if (inputShape) axis += inputShape.length;
+      }
+    }
+  }
+  const keepDims = (node.attributes.keep_dims as boolean) ?? true;
+  emitter.line(`const ${output} = builder.argMin(${input}, ${axis}${keepDims ? '' : ', { keepDimensions: false }'});`);
 }
 
 function emitDepthToSpace(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
   const output = emitter.declare(node.outputs[0]);
-  emitter.line(`const ${output} = builder.depthToSpace(${input});`);
+  const blockSize = (node.attributes.block_size as number) ?? 2;
+  emitter.line(`const ${output} = builder.depthToSpace(${input}, ${blockSize});`);
 }
 
 function emitSpaceToDepth(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
   const output = emitter.declare(node.outputs[0]);
-  emitter.line(`const ${output} = builder.spaceToDepth(${input});`);
+  const blockSize = (node.attributes.block_size as number) ?? 2;
+  emitter.line(`const ${output} = builder.spaceToDepth(${input}, ${blockSize});`);
 }
 
 function emitCumSum(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
   const output = emitter.declare(node.outputs[0]);
-  emitter.line(`const ${output} = builder.cumulativeSum(${input}, 0);`);
+  // TFLite CUMSUM: inputs[1] is the axis (constant int32 scalar)
+  let axis = 0;
+  if (node.inputs.length > 1) {
+    const axisValues = emitter.constantIntValues(node.inputs[1]);
+    if (axisValues) {
+      axis = axisValues[0];
+      if (axis < 0) {
+        const inputShape = emitter.tensorShape(node.inputs[0]);
+        if (inputShape) axis += inputShape.length;
+      }
+    }
+  }
+  emitter.line(`const ${output} = builder.cumulativeSum(${input}, ${axis});`);
 }
 
 // TFLite DEQUANTIZE — quantization params are in tensor metadata (stored as attributes by parser)
@@ -56,33 +96,26 @@ function emitDequantize(node: NodeIR, emitter: CodeEmitter): void {
   const zpValues = findQuantizationZeroPoint(node);
 
   if (scaleValues && scaleValues.length > 0) {
-    // Determine input rank and dtype for proper shape and type matching
-    const inputShape = emitter.tensorShape(node.inputs[0]);
-    const inputRank = inputShape ? inputShape.length : 0;
-    const inputDtype = emitter.tensorDataType(node.inputs[0]) ?? 'int8';
-
-    // Build shape that matches input rank (spec requirement)
-    let paramShape: string;
-    if (scaleValues.length === 1 && inputRank > 0) {
-      paramShape = `[${new Array(inputRank).fill(1).join(', ')}]`;
-    } else if (scaleValues.length > 1 && inputRank > 0) {
-      const dims = new Array(inputRank).fill(1);
-      dims[inputRank - 1] = scaleValues.length;
-      paramShape = `[${dims.join(', ')}]`;
-    } else {
-      paramShape = `[${scaleValues.length}]`;
-    }
-
+    // Decompose: output = (cast(input, float32) - zeroPoint) * scale
+    // Using cast + sub + mul avoids dequantizeLinear's rank constraints.
+    const castVar = `${output}_f32`;
     const scaleVar = `${output}_scale`;
-    emitter.line(`const ${scaleVar} = builder.constant({dataType: 'float32', shape: ${paramShape}}, new Float32Array([${scaleValues.join(', ')}]));`);
+    emitter.line(`const ${castVar} = builder.cast(${input}, 'float32');`);
 
-    // zeroPoint must match input's dataType (spec requirement)
+    const scaleShape = scaleValues.length === 1 ? '[]' : `[${scaleValues.length}]`;
+    emitter.line(`const ${scaleVar} = builder.constant({dataType: 'float32', shape: ${scaleShape}}, new Float32Array([${scaleValues.join(', ')}]));`);
+
     const zpArr = zpValues ?? [0];
-    const zpArrayType = dataTypeToArray[inputDtype] ?? 'Int8Array';
-    const zpVar = `${output}_zp`;
-    emitter.line(`const ${zpVar} = builder.constant({dataType: '${inputDtype}', shape: ${paramShape}}, new ${zpArrayType}([${zpArr.join(', ')}]));`);
+    const allZerosZp = zpArr.every((v) => v === 0);
 
-    emitter.line(`const ${output} = builder.dequantizeLinear(${input}, ${scaleVar}, ${zpVar});`);
+    if (allZerosZp) {
+      emitter.line(`const ${output} = builder.mul(${castVar}, ${scaleVar});`);
+    } else {
+      const zpConstVar = `${output}_zpf`;
+      const zpShape = zpArr.length === 1 ? '[]' : `[${zpArr.length}]`;
+      emitter.line(`const ${zpConstVar} = builder.constant({dataType: 'float32', shape: ${zpShape}}, new Float32Array([${zpArr.map((v) => v.toString()).join(', ')}]));`);
+      emitter.line(`const ${output} = builder.mul(builder.sub(${castVar}, ${zpConstVar}), ${scaleVar});`);
+    }
   } else {
     emitter.comment('No quantization params found — using cast as fallback');
     emitter.line(`const ${output} = builder.cast(${input}, 'float32');`);
@@ -100,33 +133,24 @@ function emitQuantize(node: NodeIR, emitter: CodeEmitter): void {
   const zpValues = findQuantizationZeroPoint(node);
 
   if (scaleValues && scaleValues.length > 0) {
-    // Determine input rank and output dtype for proper shape and type matching
-    const inputShape = emitter.tensorShape(node.inputs[0]);
-    const inputRank = inputShape ? inputShape.length : 0;
+    // Decompose: output = cast(round(input / scale + zeroPoint), outputDtype)
+    // Using cast + div + add avoids quantizeLinear's rank constraints.
     const outputDtype = emitter.tensorDataType(node.outputs[0]) ?? 'uint8';
-
-    // Build shape that matches input rank (spec requirement)
-    let paramShape: string;
-    if (scaleValues.length === 1 && inputRank > 0) {
-      paramShape = `[${new Array(inputRank).fill(1).join(', ')}]`;
-    } else if (scaleValues.length > 1 && inputRank > 0) {
-      const dims = new Array(inputRank).fill(1);
-      dims[inputRank - 1] = scaleValues.length;
-      paramShape = `[${dims.join(', ')}]`;
-    } else {
-      paramShape = `[${scaleValues.length}]`;
-    }
-
     const scaleVar = `${output}_scale`;
-    emitter.line(`const ${scaleVar} = builder.constant({dataType: 'float32', shape: ${paramShape}}, new Float32Array([${scaleValues.join(', ')}]));`);
+    const scaleShape = scaleValues.length === 1 ? '[]' : `[${scaleValues.length}]`;
+    emitter.line(`const ${scaleVar} = builder.constant({dataType: 'float32', shape: ${scaleShape}}, new Float32Array([${scaleValues.join(', ')}]));`);
 
-    // zeroPoint must match output's dataType (spec requirement)
     const zpArr = zpValues ?? [0];
-    const zpArrayType = dataTypeToArray[outputDtype] ?? 'Uint8Array';
-    const zpVar = `${output}_zp`;
-    emitter.line(`const ${zpVar} = builder.constant({dataType: '${outputDtype}', shape: ${paramShape}}, new ${zpArrayType}([${zpArr.join(', ')}]));`);
+    const allZerosZp = zpArr.every((v) => v === 0);
 
-    emitter.line(`const ${output} = builder.quantizeLinear(${input}, ${scaleVar}, ${zpVar});`);
+    if (allZerosZp) {
+      emitter.line(`const ${output} = builder.cast(builder.div(${input}, ${scaleVar}), '${outputDtype}');`);
+    } else {
+      const zpConstVar = `${output}_zpf`;
+      const zpShape = zpArr.length === 1 ? '[]' : `[${zpArr.length}]`;
+      emitter.line(`const ${zpConstVar} = builder.constant({dataType: 'float32', shape: ${zpShape}}, new Float32Array([${zpArr.map((v) => v.toString()).join(', ')}]));`);
+      emitter.line(`const ${output} = builder.cast(builder.add(builder.div(${input}, ${scaleVar}), ${zpConstVar}), '${outputDtype}');`);
+    }
   } else {
     emitter.comment('No quantization params found — using cast as fallback');
     emitter.line(`const ${output} = builder.cast(${input}, 'uint8');`);
@@ -158,9 +182,20 @@ function findQuantizationZeroPoint(node: NodeIR): number[] | undefined {
 function emitBroadcastTo(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
   const output = emitter.declare(node.outputs[0]);
+  // WebNN expand(input, newShape) — newShape is sequence<unsigned long>, not an MLOperand
   if (node.inputs.length > 1) {
-    const shape = emitter.ref(node.inputs[1]);
-    emitter.line(`const ${output} = builder.expand(${input}, ${shape});`);
+    const shapeValues = emitter.constantIntValues(node.inputs[1]);
+    if (shapeValues) {
+      emitter.line(`const ${output} = builder.expand(${input}, [${shapeValues}]);`);
+    } else {
+      const outShape = emitter.tensorShape(node.outputs[0]);
+      if (outShape) {
+        emitter.line(`const ${output} = builder.expand(${input}, [${outShape.join(', ')}]);`);
+      } else {
+        emitter.comment('WARNING: BROADCAST_TO shape unknown');
+        emitter.line(`const ${output} = ${input};`);
+      }
+    }
   } else {
     emitter.line(`const ${output} = ${input}; // BROADCAST_TO`);
   }

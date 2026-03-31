@@ -272,7 +272,7 @@ main {
 .btn-sm { padding: 0.25rem 1rem; font-size: .82rem; }
 
 #coverageWarning {
-  padding: .75rem 1rem;
+  padding: .5rem;
 }
 
 /* --- Status banner --- */
@@ -724,7 +724,7 @@ footer a:hover {
 @media (min-width: 1200px) {
   header {
     max-width: 1500px;
-    padding: 1rem 1rem 1rem 1.5rem;
+    padding: 0.5rem 1rem;
   }
 
   main.has-model {
@@ -937,7 +937,7 @@ footer a:hover {
   display: flex;
   align-items: center;
   gap: .5rem;
-  padding: .5rem .75rem;
+  padding: .5rem;
   background: var(--bg);
   border-bottom: 1px solid rgba(0, 0, 0, .06);
   flex-shrink: 0;

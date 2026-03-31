@@ -1,26 +1,30 @@
 # model2webnn
 
-Convert `.onnx` and `.tflite` models into ready-to-run [WebNN API](https://www.w3.org/TR/webnn/) JavaScript code.
+Convert `.onnx` and `.tflite` models into ready-to-run [WebNN API](https://www.w3.org/TR/webnn/) JavaScript.
 
-[**Try it online**](https://ibelem.github.io/model2webnn) | [WebNN Spec](https://www.w3.org/TR/webnn/) | [WebNN Netron](https://ibelem.github.io/netron/)
+[**Try it online**](https://ibelem.github.io/model2webnn) · [WebNN spec](https://www.w3.org/TR/webnn/) · [WebNN Netron](https://ibelem.github.io/netron/)
 
 ## Overview
 
-model2webnn parses ML model files and generates self-contained JavaScript that uses the WebNN `MLGraphBuilder` API. All processing runs client-side — models never leave the browser.
+model2webnn parses `.onnx` and `.tflite` model files and generates self-contained JavaScript that uses the [WebNN `MLGraphBuilder`](https://www.w3.org/TR/webnn/#api-mlgraphbuilder) API. All processing is client-side — models never leave the browser.
 
-**Supported inputs:** ONNX (`.onnx`), TFLite (`.tflite`)
-**Outputs:** `.js` code, `.weights` binary, `.manifest.json`, optional `.html` test page
+**Inputs:** ONNX (`.onnx`), TFLite (`.tflite`)  
+**Outputs:** `.js`, `.ts`, `.html`, `.weights` (WGWT binary), `.manifest.json`
+
+---
 
 ## Getting started
 
 ### Web UI
 
 1. Open [ibelem.github.io/model2webnn](https://ibelem.github.io/model2webnn)
-2. Upload a model file or paste a HuggingFace URL
-3. Code generates instantly — set free dimension overrides to regenerate with fixed values
-4. Download the bundle from the header
+2. Upload a model or paste a URL (HuggingFace links supported)
+3. Code generates instantly in the Monaco editor
+4. Set free dimension overrides to regenerate with fixed shapes
+5. Download individual files or the full `.zip` bundle from the header
 
-**Direct link:** Append `?url=` to auto-fetch a model:
+**Direct URL fetch** — append `?url=` to auto-load a model on open:
+
 ```
 https://ibelem.github.io/model2webnn?url=https://huggingface.co/webnn/mobilenet-v2/resolve/main/onnx/model_fp16.onnx
 ```
@@ -39,7 +43,7 @@ npx tsx src/cli.ts --list-ops
 | `-o, --output <dir>` | Output directory (default: `.`) |
 | `-f, --format <fmt>` | `js`, `ts`, or `html` (default: `js`) |
 | `-d, --free-dim <n=v>` | Override a symbolic dimension; repeatable |
-| `--list-ops` | Print all supported operations |
+| `--list-ops` | Print all supported operations and exit |
 
 ### Library API
 
@@ -52,98 +56,34 @@ const result = await convert(buffer, {
   freeDimensionOverrides: { batch_size: 1 },
 });
 
-result.code;      // JS source with buildGraph()
-result.weights;   // Uint8Array — WGWT binary
-result.manifest;  // { format, version, tensors: { ... } }
-result.html;      // Self-contained test page
-result.coverage;  // { totalOps, supportedOps, unsupportedOpTypes, ... }
+result.code;               // .js source — buildGraph(context, weights)
+result.weights;            // Uint8Array — WGWT binary
+result.manifest;           // tensor name → { dataType, shape, byteOffset, byteLength }
+result.html;               // self-contained test page
+result.coverage;           // { totalOps, supportedOps, unsupportedOpTypes, … }
+result.unresolvedFreeDims; // symbolic dimension names not yet overridden
 ```
+
+---
 
 ## Output files
 
-| File | Content |
-|------|---------|
-| `model.js` | `buildGraph(context, weights)` using `MLGraphBuilder` calls |
-| `model.weights` | WGWT v1 binary — `"WGWT"` magic + version u32 + raw tensor data |
-| `model.manifest.json` | Tensor metadata: data types, shapes, byte offsets |
-| `model.html` | Runnable page with device selector and inference harness |
+| File | Description |
+|------|-------------|
+| `model.js` | `async buildGraph(context, weights)` — pure `MLGraphBuilder` calls, no framework |
+| `model.weights` | WGWT v1 binary — raw tensor data with 8-byte header |
+| `model.manifest.json` | Tensor index: names, shapes, data types, byte offsets |
+| `model.html` | Runnable test harness with device selector and result viewer |
 
-## Operator coverage
-
-All 107 ONNX ops from the [ORT WebNN Execution Provider](https://github.com/microsoft/onnxruntime/tree/main/onnxruntime/core/providers/webnn) are implemented, plus 7 additional ops. 95 TFLite ops are also supported.
-
-### ONNX (114 ops)
-
-<details>
-<summary>Direct mappings (99 ops)</summary>
-
-Abs, Add, And, ArgMax, ArgMin, AveragePool, BatchNormalization, Cast, Ceil, Clip, Concat, Conv, ConvInteger, ConvTranspose, Cos, CumSum, DepthToSpace, DequantizeLinear, Div, Dropout, DynamicQuantizeLinear, Elu, Equal, Erf, Exp, Expand, Flatten, Floor, Gather, GatherBlockQuantized, GatherElements, GatherND, Gelu, Gemm, GlobalAveragePool, GlobalLpPool, GlobalMaxPool, Greater, GreaterOrEqual, GroupNormalization, HardSigmoid, HardSwish, Identity, InstanceNormalization, IsInf, IsNaN, LRN, LayerNormalization, LeakyRelu, Less, LessOrEqual, Log, LpPool, MatMul, MatMulInteger, Max, MaxPool, Mean, Min, Mul, Neg, Not, Or, PRelu, Pad, Pow, QuantizeLinear, Reciprocal, ReduceL1, ReduceL2, ReduceLogSum, ReduceLogSumExp, ReduceMax, ReduceMean, ReduceMin, ReduceProd, ReduceSum, ReduceSumSquare, Relu, Reshape, Resize, Round, ScatterElements, ScatterND, Shape, Sigmoid, Sign, SimplifiedLayerNormalization, Sin, SkipSimplifiedLayerNormalization, Slice, Softmax, Softplus, Softsign, SpaceToDepth, Split, Sqrt, Squeeze, Sub, Tan, Tanh, Tile, Transpose, Trilu, Unsqueeze, Where, Xor
-
-</details>
-
-<details>
-<summary>Composite ops (8 ops, decomposed into WebNN primitives)</summary>
-
-| Op | Decomposition |
-|----|--------------|
-| GroupQueryAttention | split → rotary → KV cache → group broadcast → SDPA |
-| MultiHeadAttention | reshape → transpose → past concat → SDPA |
-| RotaryEmbedding | split → cos/sin multiply → add → concat |
-| MatMulNBits | dequantize(uint4) → reshape → transpose → matmul |
-| LSTM | `builder.lstm()` with bias splitting and state management |
-| GRU | `builder.gru()` with zrn layout and reset-after |
-| Einsum | equation parsing → matmul/transpose/reshape |
-| GatherBlockQuantized | dequantize → gather |
-
-</details>
-
-<details>
-<summary>Quantization-aware ops</summary>
-
-| Op | WebNN call |
-|----|-----------|
-| DequantizeLinear | `builder.dequantizeLinear(input, scale, zeroPoint)` |
-| QuantizeLinear | `builder.quantizeLinear(input, scale, zeroPoint)` |
-| DynamicQuantizeLinear | reduceMin/Max → scale/zp computation → quantizeLinear |
-| MatMulNBits | 4-bit dequant → matmul |
-| GatherBlockQuantized | block dequant → gather |
-| ConvInteger | `builder.conv2d()` (quantized inputs) |
-| MatMulInteger | `builder.matmul()` (quantized inputs) |
-
-</details>
-
-### TFLite (95 ops)
-
-<details>
-<summary>Full list</summary>
-
-ABS, ADD, ADD_N, ARG_MAX, ARG_MIN, AVERAGE_POOL_2D, BATCH_MATMUL, BROADCAST_TO, CAST, CEIL, CONCATENATION, CONV_2D, COS, CUMSUM, DEPTH_TO_SPACE, DEPTHWISE_CONV_2D, DEQUANTIZE, DIV, ELU, EQUAL, EXP, EXPAND_DIMS, FLOOR, FLOOR_DIV, FULLY_CONNECTED, GATHER, GATHER_ND, GELU, GREATER, GREATER_EQUAL, HARD_SWISH, L2_NORMALIZATION, LEAKY_RELU, LESS, LESS_EQUAL, LOG, LOGICAL_AND, LOGICAL_NOT, LOGICAL_OR, LOG_SOFTMAX, LOGISTIC, MAX_POOL_2D, MAXIMUM, MEAN, MINIMUM, MIRROR_PAD, MUL, NEG, NOT_EQUAL, PACK, PAD, PADV2, POW, PRELU, QUANTIZE, RANGE, REDUCE_ANY, REDUCE_MAX, REDUCE_MIN, REDUCE_PROD, RELU, RELU6, RESHAPE, RESIZE_BILINEAR, RESIZE_NEAREST_NEIGHBOR, RSQRT, ROUND, SELECT_V2, SIN, SLICE, SOFTMAX, SPACE_TO_DEPTH, SPLIT, SPLIT_V, SQRT, SQUARE, SQUEEZE, STRIDED_SLICE, SUB, SUM, TANH, TILE, TRANSPOSE, UNPACK, WHERE
-
-</details>
-
-## Free dimension overrides
-
-Models with symbolic dimensions (e.g. `batch_size`, `sequence_length`) can keep their symbolic names in the generated code, or be overridden to fixed integer values.
-
-```bash
-# CLI
-npx tsx src/cli.ts model.onnx -d batch_size=1 -d sequence_length=128
-```
-
-In the web UI, code generates immediately with symbolic dims. Input fields appear for each symbolic dimension — typing a value auto-regenerates the code with that override applied. Empty fields keep the symbolic name as-is.
-
-See: [ONNX Runtime freeDimensionOverrides](https://webnn.io/en/learn/tutorials/onnx-runtime/free-dimension-overrides)
-
-## Weight format (WGWT)
+### WGWT weight format
 
 ```
-Offset  Content
-0–3     "WGWT"  (magic bytes, ASCII)
-4–7     1       (version, little-endian u32)
-8+      raw tensor data (concatenated)
+Bytes 0–3   "WGWT"  magic (ASCII)
+Bytes 4–7   1       version (little-endian u32)
+Bytes 8+    raw tensor data (concatenated, no padding)
 ```
 
-The companion `.manifest.json` maps tensor names to their location:
+`model.manifest.json` maps each tensor name to its slice:
 
 ```json
 {
@@ -161,102 +101,172 @@ The companion `.manifest.json` maps tensor names to their location:
 }
 ```
 
+---
+
+## Operator coverage
+
+Operator implementations follow the [ORT WebNN Execution Provider](https://github.com/microsoft/onnxruntime/tree/main/onnxruntime/core/providers/webnn) 1:1 — same attribute defaults and edge-case handling.
+
+### ONNX — 114 ops
+
+<details>
+<summary>Simple ops (direct WebNN mapping)</summary>
+
+Abs, Add, And, ArgMax, ArgMin, AveragePool, BatchNormalization, Cast, Ceil, Clip, Concat, Conv, ConvInteger, ConvTranspose, Cos, CumSum, DepthToSpace, DequantizeLinear, Div, Dropout, DynamicQuantizeLinear, Elu, Equal, Erf, Exp, Expand, Flatten, Floor, Gather, GatherElements, GatherND, Gelu, Gemm, GlobalAveragePool, GlobalLpPool, GlobalMaxPool, Greater, GreaterOrEqual, GroupNormalization, HardSigmoid, HardSwish, Identity, InstanceNormalization, IsInf, IsNaN, LRN, LayerNormalization, LeakyRelu, Less, LessOrEqual, Log, LpPool, MatMul, MatMulInteger, Max, MaxPool, Mean, Min, Mul, Neg, Not, Or, PRelu, Pad, Pow, QuantizeLinear, Reciprocal, ReduceL1, ReduceL2, ReduceLogSum, ReduceLogSumExp, ReduceMax, ReduceMean, ReduceMin, ReduceProd, ReduceSum, ReduceSumSquare, Relu, Reshape, Resize, Round, ScatterElements, ScatterND, Shape, Sigmoid, Sign, SimplifiedLayerNormalization, Sin, SkipSimplifiedLayerNormalization, Slice, Softmax, Softplus, Softsign, SpaceToDepth, Split, Sqrt, Squeeze, Sub, Tan, Tanh, Tile, Transpose, Trilu, Unsqueeze, Where, Xor
+
+</details>
+
+<details>
+<summary>Composite ops (decomposed into WebNN primitives)</summary>
+
+| Op | Strategy |
+|----|----------|
+| `GroupQueryAttention` | split → rotary embed → KV-cache concat → group broadcast → scaled dot-product attention |
+| `MultiHeadAttention` | reshape → transpose → past-KV concat → scaled dot-product attention |
+| `RotaryEmbedding` | split → cos/sin element-wise multiply → concat |
+| `MatMulNBits` | uint4 dequantize → reshape → transpose → matmul |
+| `GatherBlockQuantized` | block dequantize → gather |
+| `LSTM` | `builder.lstm()` with bias splitting and initial-state handling |
+| `GRU` | `builder.gru()` with zrn layout and reset-after semantics |
+| `Einsum` | equation parsing → matmul / transpose / reshape |
+
+</details>
+
+### TFLite — 96 ops
+
+<details>
+<summary>Full list</summary>
+
+ABS, ADD, ADD_N, ARG_MAX, ARG_MIN, AVERAGE_POOL_2D, BATCH_MATMUL, BROADCAST_TO, CAST, CEIL, CONCATENATION, CONV_2D, COS, CUMSUM, DEPTH_TO_SPACE, DEPTHWISE_CONV_2D, DEQUANTIZE, DIV, ELU, EQUAL, EXP, EXPAND_DIMS, FLOOR, FLOOR_DIV, FULLY_CONNECTED, GATHER, GATHER_ND, GELU, GREATER, GREATER_EQUAL, HARD_SWISH, L2_NORMALIZATION, L2_POOL_2D, LEAKY_RELU, LESS, LESS_EQUAL, LOCAL_RESPONSE_NORMALIZATION, LOG, LOGICAL_AND, LOGICAL_NOT, LOGICAL_OR, LOGISTIC, LOG_SOFTMAX, MAXIMUM, MAX_POOL_2D, MEAN, MINIMUM, MIRROR_PAD, MUL, NEG, NOT_EQUAL, PACK, PAD, PADV2, POW, PRELU, QUANTIZE, REDUCE_ALL, REDUCE_ANY, REDUCE_MAX, REDUCE_MIN, REDUCE_PROD, RELU, RELU6, RELU_0_TO_1, RELU_N1_TO_1, RESHAPE, RESIZE_BILINEAR, RESIZE_NEAREST_NEIGHBOR, ROUND, RSQRT, SCATTER_ND, SELECT, SELECT_V2, SHAPE, SIGN, SIN, SLICE, SOFTMAX, SPACE_TO_DEPTH, SPLIT, SPLIT_V, SQRT, SQUARE, SQUARED_DIFFERENCE, SQUEEZE, STRIDED_SLICE, SUB, SUM, TANH, TILE, TRANSPOSE, TRANSPOSE_CONV, UNPACK, WHERE, ZEROS_LIKE
+
+</details>
+
+### Unsupported ops
+
+When a model contains ops with no WebNN equivalent (e.g. `TopK`, `Range`, `Mod`), the codegen:
+
+1. Marks those op outputs as **dead**
+2. Propagates dead state through all downstream ops automatically
+3. Exports the last live **frontier tensors** before the dead zone instead of the original outputs
+
+The generated graph always builds successfully. See [doc/unsupported-ops-bkm.md](doc/unsupported-ops-bkm.md) for details.
+
+---
+
+## Free dimension overrides
+
+Models with symbolic dimensions (e.g. `batch_size`, `sequence_length`) are converted immediately with those names preserved. Override them to generate code with concrete shapes:
+
+```bash
+# CLI
+npx tsx src/cli.ts model.onnx -d batch_size=1 -d sequence_length=128
+```
+
+In the web UI, input fields appear for each symbolic dimension. Entering a value auto-regenerates the code. Leaving a field empty keeps the symbolic name.
+
+See [ONNX Runtime freeDimensionOverrides](https://webnn.io/en/learn/tutorials/onnx-runtime/free-dimension-overrides).
+
+---
+
 ## Architecture
 
 ```
 .onnx / .tflite
       │
       ▼
-┌──────────┐    ┌──────────┐    ┌────────────┐    ┌──────────────┐
-│  Parser   │───▶│ GraphIR  │───▶│  Operator  │───▶│   Codegen    │
-│ onnx.ts   │    │ (shared) │    │  Registry  │    │ javascript.ts│
-│ tflite.ts │    └──────────┘    └────────────┘    │ typescript.ts│
-└──────────┘                                       │ html.ts      │
-                                                   └──────┬───────┘
+   Parser          GraphIR        Op Registry        Codegen
+  onnx.ts    ──▶  (shared)  ──▶  (per op/format) ──▶  javascript.ts
+  tflite.ts                                            typescript.ts
+                                                       html.ts
                                                           │
-                                          ┌───────────────┼───────────────┐
-                                          ▼               ▼               ▼
-                                      model.js      model.weights   model.html
-                                                   model.manifest.json
+                              ┌───────────────┬──────────┴────────────┐
+                              ▼               ▼                       ▼
+                          model.js     model.weights          model.html
+                                       model.manifest.json
 ```
 
-### Source layout
+### Directory structure
 
 ```
 src/
-├── index.ts            Public API: convert(), validateOperatorCoverage()
-├── cli.ts              CLI entry point
-├── ir/
-│   └── graph.ts        GraphIR, NodeIR, TensorInfo, ConstantInfo types
+├── index.ts          Public API — convert(), validateOperatorCoverage()
+├── cli.ts            CLI entry point
+├── ir/graph.ts       GraphIR, NodeIR, TensorInfo, ConstantInfo
 ├── parsers/
-│   ├── onnx.ts         ONNX protobuf → GraphIR (with external data support)
-│   └── tflite.ts       TFLite flatbuffers → GraphIR
+│   ├── onnx.ts       ONNX protobuf → GraphIR (external data supported)
+│   └── tflite.ts     TFLite flatbuffers → GraphIR
 ├── operators/
-│   ├── registry.ts     Op dispatch: format + opType → emitter function
-│   ├── onnx/           18 builder files, ported 1:1 from ORT C++
-│   └── tflite/         TFLite op builders
-├── weights/
-│   └── packer.ts       WGWT binary packing + manifest generation
+│   ├── registry.ts   format + opType → emitter dispatch
+│   ├── onnx/         Op builders, ported 1:1 from ORT WebNN provider
+│   └── tflite/       TFLite op builders
+├── weights/packer.ts WGWT binary + manifest generation
 ├── codegen/
-│   ├── javascript.ts   Emit .js with WeightsFile class + buildGraph()
-│   ├── typescript.ts   Emit .ts with WebNN type declarations
-│   └── html.ts         Emit self-contained runnable .html
+│   ├── javascript.ts .js output — WeightsFile class + buildGraph()
+│   ├── typescript.ts .ts output — adds WebNN type declarations
+│   └── html.ts       .html output — runnable test harness
 └── web/
-    ├── index.html      Web UI shell
-    ├── app.ts           Orchestration: upload → parse → preview → download
-    ├── upload.ts        File/folder/URL upload + external data handling
-    ├── preview.ts       Monaco editor code preview
-    └── download.ts      ZIP bundle download
+    ├── app.ts        upload → convert → preview → download
+    ├── upload.ts     file / folder / URL ingestion
+    ├── preview.ts    Monaco editor preview
+    └── download.ts   per-file and ZIP download
 ```
+
+---
 
 ## Development
 
 ```bash
-npm install          # Install dependencies
-npm run dev          # Start dev server (Vite)
-npm run build        # Production build
-npm run lint         # Type-check (tsc --noEmit)
-npm test             # Run tests (vitest)
+npm install      # install dependencies
+npm run dev      # Vite dev server with HMR
+npm run build    # production build → dist/
+npm run lint     # tsc --noEmit
+npm test         # vitest
 ```
 
-### Adding a new ONNX operator
+### Adding an ONNX operator
 
-1. Find the ORT builder in `reference/microsoft/onnxruntime/core/providers/webnn/builders/impl/`
-2. Port the logic to a TypeScript emitter function in `src/operators/onnx/`
-3. Register with `registerOnnxOp('OpName', emitterFn)` or `registerOnnxOps([...], emitterFn)`
-4. The op is automatically available in CLI, Web UI, and library API
+1. Find the C++ builder in `reference/microsoft/onnxruntime/core/providers/webnn/builders/impl/`
+2. Port the logic to TypeScript in `src/operators/onnx/`
+3. Register: `registerOnnxOp('OpName', emitterFn)` or `registerOnnxOps([…], emitterFn)`
 
-### Adding a new output format
+The op is immediately available in the CLI, web UI, and library API.
 
-Create a new file in `src/codegen/` that accepts `GraphIR` and returns a string. Wire it into `convert()` in `src/index.ts`.
+### Adding an output format
 
-## Deployment
+Add a file to `src/codegen/` that accepts `GraphIR` and returns a `string`. Wire it into `convert()` in `src/index.ts`.
 
-**GitHub Pages** — Push to `main`. GitHub Actions runs `npm run build` and deploys `dist/` to `gh-pages`.
+---
 
-**Vercel** — Connect the repo. Vite is auto-detected. Build output: `dist/`.
-
-## Design decisions
+## Design notes
 
 | Decision | Rationale |
 |----------|-----------|
-| No NCHW↔NHWC conversion | Chromium handles transpose constant folding (CL [#6774969](https://chromium-review.googlesource.com/c/chromium/src/+/6774969)). ORT [PR #25679](https://github.com/microsoft/onnxruntime/pull/25679) removed NHWC preferred layout. |
-| Port ORT builders 1:1 | 107 ops battle-tested in production ONNX Runtime. Same attribute defaults and edge-case handling. |
-| WGWT weight format | Purpose-built for WebNN with validation magic header |
-| Format-agnostic IR | Single `GraphIR` type shared by all parsers and code generators. Adding a format = writing one parser. |
-| Client-side only | Models never leave the browser. No server required. |
-| Vanilla TS + Vite | Zero framework dependencies. Fast builds. Deploys as a static site. |
+| No NCHW ↔ NHWC conversion | Chromium folds transpose constants at graph build time ([CL #6774969](https://chromium-review.googlesource.com/c/chromium/src/+/6774969)), matching ORT's removal of NHWC preferred layout ([PR #25679](https://github.com/microsoft/onnxruntime/pull/25679)) |
+| Port ORT builders 1:1 | Reuses battle-tested attribute defaults and edge-case handling from production ORT |
+| WGWT binary format | Minimal header + raw tensor data; no per-tensor framing overhead |
+| Format-agnostic GraphIR | One shared IR for all parsers and codegen backends — adding a format means writing one parser |
+| Client-side only | No server; models never leave the browser |
+| Vanilla TypeScript + Vite | No UI framework; deploys as a single static site |
 
-## Browser compatibility
+---
 
-WebNN requires Chrome 147+ with the following flags enabled:
+## Browser requirements
 
-- `chrome://flags/#web-machine-learning-neural-network` → Enabled
-- Device support: CPU, GPU, NPU (via `MLDeviceType`)
+WebNN requires **Chrome 147+** with:
 
-> **Note:** `MLDeviceType` (`'cpu'` | `'gpu'` | `'npu'`) is implemented in Chromium but removed from the [published spec](https://www.w3.org/TR/webnn/). Generated code includes it for current Chrome builds.
+```
+chrome://flags/#web-machine-learning-neural-network → Enabled
+```
+
+Devices: CPU, GPU, NPU via `MLDeviceType`.
+
+> **Note:** `MLDeviceType` (`'cpu' | 'gpu' | 'npu'`) is a Chromium extension not in the [published WebNN spec](https://www.w3.org/TR/webnn/). Generated code includes it for compatibility with current Chrome builds.
+
+---
 
 ## References
 
-- [WebNN API Specification](https://www.w3.org/TR/webnn/)
-- [WebNN Execution Provider of ONNX Runtime](https://github.com/microsoft/onnxruntime/tree/main/onnxruntime/core/providers/webnn)
+- [WebNN API specification](https://www.w3.org/TR/webnn/)
+- [ORT WebNN Execution Provider](https://github.com/microsoft/onnxruntime/tree/main/onnxruntime/core/providers/webnn)
+- [ONNX operator schemas](https://onnx.ai/onnx/operators/)
+- [TFLite built-in ops](https://github.com/google-ai-edge/LiteRT/blob/main/tflite/converter/schema/schema.fbs)

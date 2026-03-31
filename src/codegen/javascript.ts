@@ -1,7 +1,7 @@
 // JavaScript code generator — emits .js with MLGraphBuilder calls
 // Produces a self-contained buildGraph function + WeightsFile helper.
 
-import type { GraphIR, ConstantInfo, NodeIR } from '../ir/graph.js';
+import type { GraphIR, ConstantInfo, NodeIR, MLOperandDataType, TensorInfo } from '../ir/graph.js';
 import { toJsVarName, getTypedArrayName } from '../ir/graph.js';
 import type { CodeEmitter } from '../operators/registry.js';
 import { getEmitter } from '../operators/registry.js';
@@ -15,6 +15,33 @@ export interface GenerateJsOptions {
   weightsFileName?: string; // default: "model.weights"
   manifestFileName?: string; // default: "model.manifest.json"
   includeWeightsLoader?: boolean; // default: true
+}
+
+/**
+ * Find "frontier" live tensors — the last computed values before the dead zone.
+ * These are live tensors that are consumed by at least one dead/unsupported node.
+ * Used as fallback outputs when all original graph outputs are dead.
+ */
+function findFrontierTensors(graph: GraphIR, emitter: CodeEmitter): string[] {
+  const graphInputNames = new Set(graph.inputs.map((i) => i.name));
+  const constantNames = new Set(graph.constants.map((c) => c.name));
+  const frontier = new Set<string>();
+
+  for (const node of graph.nodes) {
+    // Only look at dead/skipped nodes
+    const anyOutputDead = node.outputs.some((o) => o !== '' && emitter.isDead(o));
+    if (!anyOutputDead) continue;
+
+    for (const inp of node.inputs) {
+      if (inp === '') continue;
+      if (emitter.isDead(inp)) continue; // already dead — not a frontier
+      if (constantNames.has(inp)) continue; // skip weight tensors
+      if (graphInputNames.has(inp)) continue; // skip graph inputs
+      frontier.add(inp);
+    }
+  }
+
+  return [...frontier];
 }
 
 export function generateJavaScript(
@@ -250,17 +277,33 @@ export function generateJavaScript(
   // --- Emit nodes ---
   emit('// Graph operations');
   for (const node of graph.nodes) {
+    // Propagate dead state: if any input is dead, skip this op entirely
+    const hasDead = node.inputs.some(
+      (name) => name !== '' && emitterImpl.isDead(name),
+    );
+    if (hasDead) {
+      emit(`// SKIPPED: ${node.opType} — depends on unsupported op output`);
+      for (const out of node.outputs) {
+        if (out !== '') {
+          emitterImpl.markDead(out);
+          const varName = getOrDeclare(out);
+          emit(`const ${varName} = undefined; // dead — upstream unsupported`);
+        }
+      }
+      continue;
+    }
+
     const opEmitter = getEmitter(graph.format, node.opType);
     if (opEmitter) {
       emit(`// ${node.opType}`);
       opEmitter(node, emitterImpl);
     } else {
-      emit(`// UNSUPPORTED: ${node.opType} — skipped`);
-      // Still declare outputs to avoid reference errors
+      emit(`// UNSUPPORTED: ${node.opType} — no WebNN equivalent`);
       for (const out of node.outputs) {
         if (out !== '') {
+          emitterImpl.markDead(out);
           const varName = getOrDeclare(out);
-          emit(`const ${varName} = undefined; // TODO: implement ${node.opType}`);
+          emit(`const ${varName} = undefined; // unsupported op`);
         }
       }
     }
@@ -270,9 +313,21 @@ export function generateJavaScript(
   // --- Build named outputs ---
   emit('// Build graph');
   emit('const namedOutputs = {};');
-  for (const output of graph.outputs) {
-    const varName = getOrDeclare(output.name);
-    emit(`namedOutputs['${output.name}'] = ${varName};`);
+  const liveOutputs = graph.outputs.filter((o) => !emitterImpl.isDead(o.name));
+  if (liveOutputs.length > 0) {
+    for (const output of liveOutputs) {
+      const varName = getOrDeclare(output.name);
+      emit(`namedOutputs['${output.name}'] = ${varName};`);
+    }
+  } else {
+    // All original outputs depend on unsupported ops — export frontier tensors instead
+    const frontier = findFrontierTensors(graph, emitterImpl);
+    emit('// NOTE: All original outputs depend on unsupported ops (e.g. TopK, Range, Mod).');
+    emit('// Exporting the last computed tensors before the unsupported section.');
+    for (const name of frontier) {
+      const varName = getOrDeclare(name);
+      emit(`namedOutputs['${name}'] = ${varName};`);
+    }
   }
   emit('return await builder.build(namedOutputs);');
   indentLevel--;
@@ -314,11 +369,13 @@ export function generateJavaScript(
     );
   }
   emit('');
+  const effectiveOutputTypes = computeEffectiveOutputTypes(graph);
   emit('// Create output tensors');
   for (const output of graph.outputs) {
     const numericShape = output.shape.map((d) => (typeof d === 'number' ? d : 1));
+    const dt = effectiveOutputTypes.get(output.name) ?? output.dataType;
     emit(
-      `const outputTensor_${toJsVarName(output.name)} = await context.createTensor({ dataType: '${output.dataType}', shape: ${JSON.stringify(numericShape)}, readable: true });`,
+      `const outputTensor_${toJsVarName(output.name)} = await context.createTensor({ dataType: '${dt}', shape: ${JSON.stringify(numericShape)}, readable: true });`,
     );
   }
   emit('');
@@ -336,7 +393,8 @@ export function generateJavaScript(
   emit('');
   emit('// Read results');
   for (const output of graph.outputs) {
-    const typedArray = getTypedArrayName(output.dataType);
+    const dt = effectiveOutputTypes.get(output.name) ?? output.dataType;
+    const typedArray = getTypedArrayName(dt);
     emit(`const result_${toJsVarName(output.name)} = new ${typedArray}(await context.readTensor(outputTensor_${toJsVarName(output.name)}));`);
   }
   emit("const elapsed = (performance.now() - start).toFixed(2);");
@@ -492,16 +550,33 @@ export function generateJavaScriptFixed(
   // --- Emit nodes ---
   emit('// Graph operations');
   for (const node of graph.nodes) {
+    // Propagate dead state: if any input is dead, skip this op entirely
+    const hasDead = node.inputs.some(
+      (name) => name !== '' && emitterImpl.isDead(name),
+    );
+    if (hasDead) {
+      emit(`// SKIPPED: ${node.opType} — depends on unsupported op output`);
+      for (const out of node.outputs) {
+        if (out !== '') {
+          emitterImpl.markDead(out);
+          const varName = getOrDeclare(out);
+          emit(`const ${varName} = undefined; // dead — upstream unsupported`);
+        }
+      }
+      continue;
+    }
+
     const opEmitter = getEmitter(graph.format, node.opType);
     if (opEmitter) {
       emit(`// ${node.opType}`);
       opEmitter(node, emitterImpl);
     } else {
-      emit(`// UNSUPPORTED: ${node.opType}`);
+      emit(`// UNSUPPORTED: ${node.opType} — no WebNN equivalent`);
       for (const out of node.outputs) {
         if (out !== '') {
+          emitterImpl.markDead(out);
           const varName = getOrDeclare(out);
-          emit(`const ${varName} = undefined; // TODO: implement ${node.opType}`);
+          emit(`const ${varName} = undefined; // unsupported op`);
         }
       }
     }
@@ -511,9 +586,21 @@ export function generateJavaScriptFixed(
   // --- Build graph ---
   emit('// Build graph');
   emit('const namedOutputs = {};');
-  for (const output of graph.outputs) {
-    const varName = getOrDeclare(output.name);
-    emit(`namedOutputs['${escapeSingleQuotes(output.name)}'] = ${varName};`);
+  const liveOutputs = graph.outputs.filter((o) => !emitterImpl.isDead(o.name));
+  if (liveOutputs.length > 0) {
+    for (const output of liveOutputs) {
+      const varName = getOrDeclare(output.name);
+      emit(`namedOutputs['${escapeSingleQuotes(output.name)}'] = ${varName};`);
+    }
+  } else {
+    // All original outputs depend on unsupported ops — export frontier tensors instead
+    const frontier = findFrontierTensors(graph, emitterImpl);
+    emit('// NOTE: All original outputs depend on unsupported ops (e.g. TopK, Range, Mod).');
+    emit('// Exporting the last computed tensors before the unsupported section.');
+    for (const name of frontier) {
+      const varName = getOrDeclare(name);
+      emit(`namedOutputs['${escapeSingleQuotes(name)}'] = ${varName};`);
+    }
   }
   emit('return await builder.build(namedOutputs);');
   indentLevel--;
@@ -598,11 +685,13 @@ function emitMainFunction(
     emit(`context.writeTensor(inputTensor_${vn}, inputData_${vn});`);
   }
   emit('');
+  const effectiveOutputTypes = computeEffectiveOutputTypes(graph);
   emit('// Create output tensors');
   for (const output of graph.outputs) {
     const numericShape = output.shape.map((d) => (typeof d === 'number' ? d : 1));
     const vn = toJsVarName(output.name);
-    emit(`const outputTensor_${vn} = await context.createTensor({ dataType: '${output.dataType}', shape: ${JSON.stringify(numericShape)}, readable: true });`);
+    const dt = effectiveOutputTypes.get(output.name) ?? output.dataType;
+    emit(`const outputTensor_${vn} = await context.createTensor({ dataType: '${dt}', shape: ${JSON.stringify(numericShape)}, readable: true });`);
   }
   emit('');
   emit('const inputs = {');
@@ -625,7 +714,8 @@ function emitMainFunction(
   emit('');
   emit('// Read results');
   for (const output of graph.outputs) {
-    const typedArray = getTypedArrayName(output.dataType);
+    const dt = effectiveOutputTypes.get(output.name) ?? output.dataType;
+    const typedArray = getTypedArrayName(dt);
     const vn = toJsVarName(output.name);
     emit(`const result_${vn} = new ${typedArray}(await context.readTensor(outputTensor_${vn}));`);
   }
@@ -640,4 +730,145 @@ function emitMainFunction(
 
 function escapeSingleQuotes(s: string): string {
   return s.replace(/'/g, "\\'");
+}
+
+/**
+ * Compute the actual graph outputs that buildGraph() will produce.
+ *
+ * When all original outputs depend on unsupported ops (e.g. TopK, Range, Mod),
+ * the codegen substitutes "frontier" tensors — the last computed values before
+ * the dead zone. This function replicates the dead-propagation logic to return
+ * the same set of TensorInfo objects that the generated namedOutputs will use.
+ */
+export function computeEffectiveOutputs(graph: GraphIR): TensorInfo[] {
+  const constantNames = new Set(graph.constants.map((c) => c.name));
+  const graphInputNames = new Set(graph.inputs.map((i) => i.name));
+  const dead = new Set<string>();
+
+  // Replicate dead propagation
+  for (const node of graph.nodes) {
+    const hasDead = node.inputs.some((name) => name !== '' && dead.has(name));
+    if (hasDead) {
+      for (const out of node.outputs) {
+        if (out !== '') dead.add(out);
+      }
+      continue;
+    }
+    const emitter = getEmitter(graph.format, node.opType);
+    if (!emitter) {
+      for (const out of node.outputs) {
+        if (out !== '') dead.add(out);
+      }
+    }
+  }
+
+  // Check if any original outputs are live
+  const liveOutputs = graph.outputs.filter((o) => !dead.has(o.name));
+  if (liveOutputs.length > 0) return liveOutputs;
+
+  // All original outputs dead — find frontier tensors (same logic as codegen)
+  const frontier: string[] = [];
+  for (const node of graph.nodes) {
+    const anyOutputDead = node.outputs.some((o) => o !== '' && dead.has(o));
+    if (!anyOutputDead) continue;
+    for (const inp of node.inputs) {
+      if (inp === '' || dead.has(inp)) continue;
+      if (constantNames.has(inp) || graphInputNames.has(inp)) continue;
+      frontier.push(inp);
+    }
+  }
+
+  // Deduplicate while preserving order
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const name of frontier) {
+    if (!seen.has(name)) { seen.add(name); unique.push(name); }
+  }
+
+  // Build TensorInfo for each frontier tensor from the graph's shape/dataType maps
+  return unique.map((name) => ({
+    name,
+    dataType: graph.dataTypes?.get(name) ?? 'float32',
+    shape: graph.shapes?.get(name) ?? [],
+  }));
+}
+
+/**
+ * Compute effective output data types for the test harness.
+ *
+ * TFLite quantized models store output tensors as int8/uint8, but the generated
+ * WebNN graph dequantizes all computations to float32. The actual MLGraph
+ * outputs are therefore float32, not the original quantized type.
+ *
+ * We trace backward from each output: if any ancestor op dequantizes its inputs
+ * (i.e. the model format is tflite and the type is quantized), the effective
+ * output type is float32.
+ */
+export function computeEffectiveOutputTypes(graph: GraphIR): Map<string, MLOperandDataType> {
+  const effectiveTypes = new Map<string, MLOperandDataType>();
+
+  if (graph.format !== 'tflite') {
+    // ONNX models don't do implicit dequantization in our pipeline
+    for (const o of graph.outputs) effectiveTypes.set(o.name, o.dataType);
+    return effectiveTypes;
+  }
+
+  // Build a producer map: tensor name → producing NodeIR
+  const producerMap = new Map<string, NodeIR>();
+  for (const node of graph.nodes) {
+    for (const out of node.outputs) {
+      producerMap.set(out, node);
+    }
+  }
+
+  // Ops that explicitly re-quantize (output stays int8/uint8)
+  const quantizeOps = new Set(['QUANTIZE']);
+
+  // Walk backward from each output to determine effective type
+  for (const output of graph.outputs) {
+    if (output.dataType !== 'int8' && output.dataType !== 'uint8') {
+      effectiveTypes.set(output.name, output.dataType);
+      continue;
+    }
+
+    // Check if the producing chain dequantizes
+    let tensorName = output.name;
+    let effectiveType: MLOperandDataType = output.dataType;
+    const visited = new Set<string>();
+
+    while (tensorName && !visited.has(tensorName)) {
+      visited.add(tensorName);
+      const producer = producerMap.get(tensorName);
+      if (!producer) break;
+
+      if (quantizeOps.has(producer.opType)) {
+        // Explicit quantize — output stays quantized
+        effectiveType = output.dataType;
+        break;
+      }
+
+      // Shape-preserving pass-through ops: check their first input
+      const passThroughOps = new Set([
+        'RESHAPE', 'TRANSPOSE', 'SQUEEZE', 'EXPAND_DIMS',
+        'PACK', 'UNPACK', 'SPLIT', 'SPLIT_V',
+        'CONCATENATION', 'GATHER', 'SLICE', 'STRIDED_SLICE',
+        'PAD', 'PADV2', 'TILE', 'MIRROR_PAD',
+      ]);
+
+      if (passThroughOps.has(producer.opType)) {
+        // These ops preserve the data type of their input — trace deeper
+        tensorName = producer.inputs[0];
+        continue;
+      }
+
+      // Computational ops (FULLY_CONNECTED, CONV_2D, matmul, etc.)
+      // — these call emitDequantizeIfNeeded and produce float32
+      effectiveType = 'float32';
+      break;
+    }
+
+    effectiveTypes.set(output.name, effectiveType);
+  }
+
+  return effectiveTypes;
 }

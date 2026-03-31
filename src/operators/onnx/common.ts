@@ -121,6 +121,7 @@ function emitFlatten(node: NodeIR, emitter: CodeEmitter): void {
 // squeeze_unsqueeze_op_builder.cc
 // ORT reads axes from attribute (opset <13) or constant initializer (opset 13+),
 // resolves negative indices, then uses reshape to implement squeeze/unsqueeze.
+// WebNN has no squeeze/unsqueeze ops — ORT decomposes both to reshape.
 function emitSqueeze(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
   const output = emitter.declare(node.outputs[0]);
@@ -129,14 +130,26 @@ function emitSqueeze(node: NodeIR, emitter: CodeEmitter): void {
   if (!axes && node.inputs.length > 1 && node.inputs[1] !== '' && emitter.isConstant(node.inputs[1])) {
     axes = emitter.constantIntValues(node.inputs[1]) ?? undefined;
   }
-  if (axes) {
-    // Resolve negative axes
-    const inputShape = emitter.tensorShape(node.inputs[0]);
-    const rank = inputShape ? inputShape.length : 0;
-    const resolved = axes.map((a) => (a < 0 && rank > 0 ? a + rank : a));
-    emitter.line(`const ${output} = builder.squeeze(${input}, { axes: [${resolved.join(', ')}] });`);
+  // Use output shape from graph if available
+  const outputShape = emitter.tensorShape(node.outputs[0]);
+  if (outputShape && outputShape.every((d) => typeof d === 'number' && d >= 0)) {
+    emitter.line(`const ${output} = builder.reshape(${input}, [${outputShape.join(', ')}]);`);
+    return;
+  }
+  // Compute output shape by removing axes from input shape
+  const inputShape = emitter.tensorShape(node.inputs[0]);
+  if (inputShape && inputShape.every((d) => typeof d === 'number') && axes) {
+    const rank = inputShape.length;
+    const resolved = new Set(axes.map((a) => (a < 0 ? a + rank : a)));
+    const newShape = (inputShape as number[]).filter((_, i) => !resolved.has(i));
+    emitter.line(`const ${output} = builder.reshape(${input}, [${newShape.join(', ')}]);`);
+  } else if (inputShape && inputShape.every((d) => typeof d === 'number') && !axes) {
+    // No axes specified: remove all dimensions of size 1
+    const newShape = (inputShape as number[]).filter((d) => d !== 1);
+    emitter.line(`const ${output} = builder.reshape(${input}, [${newShape.join(', ')}]);`);
   } else {
-    emitter.line(`const ${output} = builder.squeeze(${input});`);
+    emitter.comment(`WARNING: Cannot resolve squeeze — missing shape info`);
+    emitter.line(`const ${output} = ${input}; // squeeze fallback`);
   }
 }
 
@@ -148,14 +161,31 @@ function emitUnsqueeze(node: NodeIR, emitter: CodeEmitter): void {
   if (!axes && node.inputs.length > 1 && node.inputs[1] !== '' && emitter.isConstant(node.inputs[1])) {
     axes = emitter.constantIntValues(node.inputs[1]) ?? undefined;
   }
-  if (axes) {
-    // For Unsqueeze, resolve against expanded rank
-    const inputShape = emitter.tensorShape(node.inputs[0]);
-    const expandedRank = (inputShape ? inputShape.length : 0) + axes.length;
-    const resolved = axes.map((a) => (a < 0 ? a + expandedRank : a));
-    emitter.line(`const ${output} = builder.unsqueeze(${input}, { axes: [${resolved.join(', ')}] });`);
+  // Use output shape from graph if available
+  const outputShape = emitter.tensorShape(node.outputs[0]);
+  if (outputShape && outputShape.every((d) => typeof d === 'number' && d >= 0)) {
+    emitter.line(`const ${output} = builder.reshape(${input}, [${outputShape.join(', ')}]);`);
+    return;
+  }
+  // Compute output shape by inserting 1s at the specified axes
+  const inputShape = emitter.tensorShape(node.inputs[0]);
+  if (inputShape && inputShape.every((d) => typeof d === 'number') && axes) {
+    const expandedRank = inputShape.length + axes.length;
+    const resolved = axes.map((a) => (a < 0 ? a + expandedRank : a)).sort((a, b) => a - b);
+    const newShape: number[] = [];
+    let srcIdx = 0;
+    for (let i = 0; i < expandedRank; i++) {
+      if (resolved.includes(i)) {
+        newShape.push(1);
+      } else {
+        newShape.push(inputShape[srcIdx] as number);
+        srcIdx++;
+      }
+    }
+    emitter.line(`const ${output} = builder.reshape(${input}, [${newShape.join(', ')}]);`);
   } else {
-    emitter.line(`const ${output} = builder.unsqueeze(${input});`);
+    emitter.comment(`WARNING: Cannot resolve unsqueeze — missing shape or axes info`);
+    emitter.line(`const ${output} = ${input}; // unsqueeze fallback`);
   }
 }
 
@@ -170,7 +200,12 @@ function emitConcat(node: NodeIR, emitter: CodeEmitter): void {
 
   const inputs = node.inputs.map((name) => emitter.ref(name));
   const output = emitter.declare(node.outputs[0]);
-  const axis = (node.attributes.axis as number) ?? 0;
+  let axis = (node.attributes.axis as number) ?? 0;
+  // WebNN axis is unsigned long — normalize negative values
+  if (axis < 0) {
+    const inputShape = emitter.tensorShape(node.inputs[0]);
+    if (inputShape) axis = axis + inputShape.length;
+  }
   emitter.line(`const ${output} = builder.concat([${inputs.join(', ')}], ${axis});`);
 }
 
@@ -178,7 +213,12 @@ function emitConcat(node: NodeIR, emitter: CodeEmitter): void {
 // ORT reads split sizes from attribute (opset <13) or constant initializer (opset 13+).
 function emitSplit(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
-  const axis = (node.attributes.axis as number) ?? 0;
+  let axis = (node.attributes.axis as number) ?? 0;
+  // WebNN axis is unsigned long — normalize negative values
+  if (axis < 0) {
+    const inputShape = emitter.tensorShape(node.inputs[0]);
+    if (inputShape) axis = axis + inputShape.length;
+  }
   const numOutputs = node.outputs.length;
 
   // Try attribute first, then second input constant (opset 13+)
@@ -294,7 +334,12 @@ function emitGather(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
   const indices = emitter.ref(node.inputs[1]);
   const output = emitter.declare(node.outputs[0]);
-  const axis = (node.attributes.axis as number) ?? 0;
+  let axis = (node.attributes.axis as number) ?? 0;
+  // WebNN axis is unsigned long — normalize negative values
+  if (axis < 0) {
+    const inputShape = emitter.tensorShape(node.inputs[0]);
+    if (inputShape) axis = axis + inputShape.length;
+  }
   emitter.line(`const ${output} = builder.gather(${input}, ${indices}, { axis: ${axis} });`);
 }
 
@@ -421,7 +466,12 @@ function emitCast(node: NodeIR, emitter: CodeEmitter): void {
 function emitSoftmax(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
   const output = emitter.declare(node.outputs[0]);
-  const axis = (node.attributes.axis as number) ?? -1;
+  let axis = (node.attributes.axis as number) ?? -1;
+  // WebNN axis is unsigned long — normalize negative values
+  if (axis < 0) {
+    const inputShape = emitter.tensorShape(node.inputs[0]);
+    axis = inputShape ? axis + inputShape.length : 1;
+  }
   emitter.line(`const ${output} = builder.softmax(${input}, ${axis});`);
 }
 

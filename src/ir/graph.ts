@@ -132,7 +132,7 @@ export function getFreeDimensions(graph: GraphIR): string[] {
 
 /**
  * Apply freeDimensionOverrides: replace symbolic dimension names with concrete numbers.
- * Modifies shapes in-place on inputs, outputs, and the shapes referenced by nodes.
+ * Modifies shapes in-place on inputs, outputs, and the shapes map.
  */
 export function applyFreeDimensionOverrides(
   graph: GraphIR,
@@ -149,6 +149,36 @@ export function applyFreeDimensionOverrides(
   }
   for (const t of graph.outputs) {
     t.shape = resolveShape(t.shape);
+  }
+  if (graph.shapes) {
+    for (const [name, shape] of graph.shapes) {
+      graph.shapes.set(name, resolveShape(shape));
+    }
+  }
+}
+
+/**
+ * Replace any remaining symbolic (string) dimensions with a default concrete value.
+ * WebNN requires all dimensions to be unsigned long, so dynamic dims must be resolved.
+ * Call this after applyFreeDimensionOverrides to handle any dims not covered by overrides.
+ */
+export function resolveRemainingDynamicDims(
+  graph: GraphIR,
+  defaultValue = 1,
+): void {
+  function makeNumeric(shape: (number | string)[]): (number | string)[] {
+    return shape.map((d) => (typeof d === 'string' ? defaultValue : d));
+  }
+  for (const t of graph.inputs) {
+    t.shape = makeNumeric(t.shape);
+  }
+  for (const t of graph.outputs) {
+    t.shape = makeNumeric(t.shape);
+  }
+  if (graph.shapes) {
+    for (const [name, shape] of graph.shapes) {
+      graph.shapes.set(name, makeNumeric(shape));
+    }
   }
 }
 
