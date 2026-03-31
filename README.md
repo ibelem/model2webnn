@@ -9,7 +9,7 @@ Convert `.onnx` and `.tflite` models into ready-to-run [WebNN API](https://www.w
 model2webnn parses `.onnx` and `.tflite` model files and generates self-contained JavaScript that uses the [WebNN `MLGraphBuilder`](https://www.w3.org/TR/webnn/#api-mlgraphbuilder) API. All processing is client-side — models never leave the browser.
 
 **Inputs:** ONNX (`.onnx`), TFLite (`.tflite`)  
-**Outputs:** `.js`, `.ts`, `.html`, `.weights` (WGWT binary), `.manifest.json`
+**Outputs:** `.js`, `.ts`, `.html`, `.weights` (WebNN Graph Weights binary), `.manifest.json`
 
 ---
 
@@ -57,7 +57,7 @@ const result = await convert(buffer, {
 });
 
 result.code;               // .js source — buildGraph(context, weights)
-result.weights;            // Uint8Array — WGWT binary
+result.weights;            // Uint8Array — WebNN Graph WeighTs (WGWT) binary
 result.manifest;           // tensor name → { dataType, shape, byteOffset, byteLength }
 result.html;               // self-contained test page
 result.coverage;           // { totalOps, supportedOps, unsupportedOpTypes, … }
@@ -71,14 +71,14 @@ result.unresolvedFreeDims; // symbolic dimension names not yet overridden
 | File | Description |
 |------|-------------|
 | `model.js` | `async buildGraph(context, weights)` — pure `MLGraphBuilder` calls, no framework |
-| `model.weights` | WGWT v1 binary — raw tensor data with 8-byte header |
+| `model.weights` | WebNN Graph WeighTs (WGWT) v1 binary — raw tensor data with 8-byte header |
 | `model.manifest.json` | Tensor index: names, shapes, data types, byte offsets |
 | `model.html` | Runnable test harness with device selector and result viewer |
 
-### WGWT weight format
+### WebNN Graph WeighTs (WGWT) weight format
 
 ```
-Bytes 0–3   "WGWT"  magic (ASCII)
+Bytes 0–3   WebNN Graph WeighTs / WGWT  magic (ASCII)
 Bytes 4–7   1       version (little-endian u32)
 Bytes 8+    raw tensor data (concatenated, no padding)
 ```
@@ -270,3 +270,4 @@ Devices: CPU, GPU, NPU via `MLDeviceType`.
 - [ORT WebNN Execution Provider](https://github.com/microsoft/onnxruntime/tree/main/onnxruntime/core/providers/webnn)
 - [ONNX operator schemas](https://onnx.ai/onnx/operators/)
 - [TFLite built-in ops](https://github.com/google-ai-edge/LiteRT/blob/main/tflite/converter/schema/schema.fbs)
+- [WebNN Graph](https://github.com/rustnn/webnn-graph)
