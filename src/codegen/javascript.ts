@@ -329,7 +329,14 @@ export function generateJavaScript(
       emit(`namedOutputs['${name}'] = ${varName};`);
     }
   }
-  emit('return await builder.build(namedOutputs);');
+  emit('// Capture actual output operand shapes (may differ from metadata for dynamic models)');  
+  emit('const outputShapes = {};');
+  emit('for (const [name, operand] of Object.entries(namedOutputs)) {');
+  indentLevel++;
+  emit('outputShapes[name] = Array.from(operand.shape);');
+  indentLevel--;
+  emit('}');
+  emit('return { graph: await builder.build(namedOutputs), outputShapes };');
   indentLevel--;
   emit('}');
   emit('');
@@ -371,13 +378,13 @@ export function generateJavaScript(
     );
   }
   emit('');
+  const effectiveOutputs = computeEffectiveOutputs(graph);
   const effectiveOutputTypes = computeEffectiveOutputTypes(graph);
-  emit('// Create output tensors');
-  for (const output of graph.outputs) {
-    const numericShape = output.shape.map((d) => (typeof d === 'number' ? d : 1));
+  emit('// Create output tensors — use actual shapes from built graph');
+  for (const output of effectiveOutputs) {
     const dt = effectiveOutputTypes.get(output.name) ?? output.dataType;
     emit(
-      `const outputTensor_${toJsVarName(output.name)} = await context.createTensor({ dataType: '${dt}', shape: ${JSON.stringify(numericShape)}, readable: true });`,
+      `const outputTensor_${toJsVarName(output.name)} = await context.createTensor({ dataType: '${dt}', shape: graph.outputShapes['${escapeSingleQuotes(output.name)}'], readable: true });`,
     );
   }
   emit('');
@@ -386,15 +393,15 @@ export function generateJavaScript(
     emit(`inputs['${input.name}'] = inputTensor_${toJsVarName(input.name)};`);
   }
   emit('const outputs = {};');
-  for (const output of graph.outputs) {
-    emit(`outputs['${output.name}'] = outputTensor_${toJsVarName(output.name)};`);
+  for (const output of effectiveOutputs) {
+    emit(`outputs['${escapeSingleQuotes(output.name)}'] = outputTensor_${toJsVarName(output.name)};`);
   }
   emit('');
   emit('const start = performance.now();');
-  emit('context.dispatch(graph, inputs, outputs);');
+  emit('context.dispatch(graph.graph, inputs, outputs);');
   emit('');
   emit('// Read results');
-  for (const output of graph.outputs) {
+  for (const output of effectiveOutputs) {
     const dt = effectiveOutputTypes.get(output.name) ?? output.dataType;
     const typedArray = getTypedArrayName(dt);
     emit(`const result_${toJsVarName(output.name)} = new ${typedArray}(await context.readTensor(outputTensor_${toJsVarName(output.name)}));`);
@@ -408,8 +415,8 @@ export function generateJavaScript(
   emit('for (let i = 0; i < NUM_RUNS; i++) {');
   indentLevel++;
   emit('const t0 = performance.now();');
-  emit('context.dispatch(graph, inputs, outputs);');
-  for (const output of graph.outputs) {
+  emit('context.dispatch(graph.graph, inputs, outputs);');
+  for (const output of effectiveOutputs) {
     const dt = effectiveOutputTypes.get(output.name) ?? output.dataType;
     const typedArray = getTypedArrayName(dt);
     emit(`new ${typedArray}(await context.readTensor(outputTensor_${toJsVarName(output.name)}));`);
@@ -424,12 +431,12 @@ export function generateJavaScript(
   emit("console.log(`Inference: ${medianTime}ms (median \\u00b7 ${NUM_RUNS} runs) on ${deviceType.toUpperCase()}`)");
   emit('');
   emit('// Access results');
-  for (const output of graph.outputs) {
-    emit(`console.log('${output.name}:', result_${toJsVarName(output.name)});`);
+  for (const output of effectiveOutputs) {
+    emit(`console.log('${escapeSingleQuotes(output.name)}:', result_${toJsVarName(output.name)});`);
   }
   emit('');
-  const returnEntries = graph.outputs.map(
-    (o) => `'${o.name}': result_${toJsVarName(o.name)}`
+  const returnEntries = effectiveOutputs.map(
+    (o) => `'${escapeSingleQuotes(o.name)}': result_${toJsVarName(o.name)}`
   );
   emit(`return { ${returnEntries.join(', ')} };`);
   indentLevel--;
@@ -625,7 +632,14 @@ export function generateJavaScriptFixed(
       emit(`namedOutputs['${escapeSingleQuotes(name)}'] = ${varName};`);
     }
   }
-  emit('return await builder.build(namedOutputs);');
+  emit('// Capture actual output operand shapes (may differ from metadata for dynamic models)');
+  emit('const outputShapes = {};');
+  emit('for (const [name, operand] of Object.entries(namedOutputs)) {');
+  indentLevel++;
+  emit('outputShapes[name] = Array.from(operand.shape);');
+  indentLevel--;
+  emit('}');
+  emit('return { graph: await builder.build(namedOutputs), outputShapes };');
   indentLevel--;
   emit('}');
   emit('');
@@ -710,13 +724,13 @@ function emitMainFunction(
     emit(`context.writeTensor(inputTensor_${vn}, inputData_${vn});`);
   }
   emit('');
+  const effectiveOutputs = computeEffectiveOutputs(graph);
   const effectiveOutputTypes = computeEffectiveOutputTypes(graph);
-  emit('// Create output tensors');
-  for (const output of graph.outputs) {
-    const numericShape = output.shape.map((d) => (typeof d === 'number' ? d : 1));
+  emit('// Create output tensors — use actual shapes from built graph');
+  for (const output of effectiveOutputs) {
     const vn = toJsVarName(output.name);
     const dt = effectiveOutputTypes.get(output.name) ?? output.dataType;
-    emit(`const outputTensor_${vn} = await context.createTensor({ dataType: '${dt}', shape: ${JSON.stringify(numericShape)}, readable: true });`);
+    emit(`const outputTensor_${vn} = await context.createTensor({ dataType: '${dt}', shape: graph.outputShapes['${escapeSingleQuotes(output.name)}'], readable: true });`);
   }
   emit('');
   emit('const inputs = {');
@@ -728,17 +742,17 @@ function emitMainFunction(
   emit('};');
   emit('const outputs = {');
   inc();
-  for (const output of graph.outputs) {
+  for (const output of effectiveOutputs) {
     emit(`'${escapeSingleQuotes(output.name)}': outputTensor_${toJsVarName(output.name)},`);
   }
   dec();
   emit('};');
   emit('');
   emit('const start = performance.now();');
-  emit('context.dispatch(graph, inputs, outputs);');
+  emit('context.dispatch(graph.graph, inputs, outputs);');
   emit('');
   emit('// Read results');
-  for (const output of graph.outputs) {
+  for (const output of effectiveOutputs) {
     const dt = effectiveOutputTypes.get(output.name) ?? output.dataType;
     const typedArray = getTypedArrayName(dt);
     const vn = toJsVarName(output.name);
@@ -752,8 +766,8 @@ function emitMainFunction(
   emit('for (let i = 0; i < NUM_RUNS; i++) {');
   inc();
   emit('const t0 = performance.now();');
-  emit('context.dispatch(graph, inputs, outputs);');
-  for (const output of graph.outputs) {
+  emit('context.dispatch(graph.graph, inputs, outputs);');
+  for (const output of effectiveOutputs) {
     const dt = effectiveOutputTypes.get(output.name) ?? output.dataType;
     const typedArray = getTypedArrayName(dt);
     const vn = toJsVarName(output.name);
@@ -768,7 +782,7 @@ function emitMainFunction(
   emit("console.log(`Inference: ${avgTime}ms (average \\u00b7 ${NUM_RUNS} runs) on ${deviceType.toUpperCase()}`)");
   emit("console.log(`Inference: ${medianTime}ms (median \\u00b7 ${NUM_RUNS} runs) on ${deviceType.toUpperCase()}`)");
   emit('');
-  const returnEntries = graph.outputs.map(
+  const returnEntries = effectiveOutputs.map(
     (o) => `'${escapeSingleQuotes(o.name)}': result_${toJsVarName(o.name)}`
   );
   emit(`return { ${returnEntries.join(', ')} };`);
@@ -778,6 +792,75 @@ function emitMainFunction(
 
 function escapeSingleQuotes(s: string): string {
   return s.replace(/'/g, "\\'");
+}
+
+/**
+ * Compute dead tensors exactly as generateJavaScriptFixed does — including
+ * conditional markDead() calls made by emitters (e.g. Shape with unknown input shape).
+ *
+ * Runs each emitter through a no-op mock emitter so that emitters which call
+ * emitter.markDead() (rather than just failing to register) are correctly handled.
+ */
+function computeDeadTensors(graph: GraphIR): Set<string> {
+  const constantNames = new Set(graph.constants.map((c) => c.name));
+  const constantMap = new Map(graph.constants.map((c) => [c.name, c]));
+  const dead = new Set<string>();
+  const varMap = new Map<string, string>();
+
+  function ref(t: string): string { return varMap.get(t) ?? toJsVarName(t); }
+
+  const mockEmitter: CodeEmitter = {
+    ref,
+    declare: (t: string) => { const v = toJsVarName(t); varMap.set(t, v); return v; },
+    line: () => { /* no-op */ },
+    comment: () => { /* no-op */ },
+    isConstant: (t: string) => constantNames.has(t),
+    constantShape: (t: string) => {
+      const c = constantMap.get(t);
+      return c ? c.shape.map((d) => (typeof d === 'number' ? d : 0)) : [];
+    },
+    constantDataType: (t: string) => constantMap.get(t)?.dataType ?? 'float32',
+    constantRawData: (t: string) => constantMap.get(t)?.rawData ?? null,
+    constantIntValues: (t: string) => {
+      const c = constantMap.get(t);
+      if (!c || !c.rawData || c.rawData.byteLength === 0) return null;
+      const aligned = new ArrayBuffer(c.rawData.byteLength);
+      new Uint8Array(aligned).set(c.rawData);
+      if (c.dataType === 'int64') return Array.from(new BigInt64Array(aligned), (v) => Number(v));
+      if (c.dataType === 'int32') return Array.from(new Int32Array(aligned));
+      if (c.dataType === 'uint32') return Array.from(new Uint32Array(aligned));
+      return null;
+    },
+    tensorShape: (t: string) => graph.shapes?.get(t) ?? null,
+    tensorDataType: (t: string) => graph.dataTypes?.get(t) ?? null,
+    findProducerNode: (t: string) => graph.nodes.find((n) => n.outputs.includes(t)) ?? null,
+    markDead: (t: string) => { dead.add(t); },
+    isDead: (t: string) => dead.has(t),
+  };
+
+  for (const node of graph.nodes) {
+    // Propagate dead state: if any input is dead, mark all outputs dead
+    const hasDead = node.inputs.some((name) => name !== '' && dead.has(name));
+    if (hasDead) {
+      for (const out of node.outputs) {
+        if (out !== '') dead.add(out);
+      }
+      continue;
+    }
+
+    const opEmitter = getEmitter(graph.format, node.opType);
+    if (opEmitter) {
+      // Run emitter so it can call emitter.markDead() if needed (e.g. Shape with unknown shape)
+      try { opEmitter(node, mockEmitter); } catch { /* ignore codegen errors in simulation */ }
+      // Any outputs not declared (not in varMap) and explicitly marked dead stay dead
+    } else {
+      for (const out of node.outputs) {
+        if (out !== '') dead.add(out);
+      }
+    }
+  }
+
+  return dead;
 }
 
 /**
@@ -791,24 +874,7 @@ function escapeSingleQuotes(s: string): string {
 export function computeEffectiveOutputs(graph: GraphIR): TensorInfo[] {
   const constantNames = new Set(graph.constants.map((c) => c.name));
   const graphInputNames = new Set(graph.inputs.map((i) => i.name));
-  const dead = new Set<string>();
-
-  // Replicate dead propagation
-  for (const node of graph.nodes) {
-    const hasDead = node.inputs.some((name) => name !== '' && dead.has(name));
-    if (hasDead) {
-      for (const out of node.outputs) {
-        if (out !== '') dead.add(out);
-      }
-      continue;
-    }
-    const emitter = getEmitter(graph.format, node.opType);
-    if (!emitter) {
-      for (const out of node.outputs) {
-        if (out !== '') dead.add(out);
-      }
-    }
-  }
+  const dead = computeDeadTensors(graph);
 
   // Check if any original outputs are live
   const liveOutputs = graph.outputs.filter((o) => !dead.has(o.name));

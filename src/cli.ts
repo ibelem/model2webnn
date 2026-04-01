@@ -155,6 +155,22 @@ async function main(): Promise<void> {
         console.warn(`  See: https://onnxruntime.ai/docs/tutorials/web/env-flags-and-session-options.html#freedimensionoverrides`);
       }
     }
+  } else {
+    const { parseTflite } = await import('./parsers/tflite.js');
+    const tempGraph = await parseTflite(buffer);
+    const freeDims = getFreeDimensions(tempGraph);
+    if (freeDims.length > 0) {
+      const resolved = freeDims.filter((d) => d in freeDimensionOverrides);
+      const unresolved = freeDims.filter((d) => !(d in freeDimensionOverrides));
+      if (resolved.length > 0) {
+        console.log(`Free dimensions overridden: ${resolved.map((d) => `${d}=${freeDimensionOverrides[d]}`).join(', ')}`);
+      }
+      if (unresolved.length > 0) {
+        console.warn(`Warning: Unresolved free dimensions: ${unresolved.join(', ')}`);
+        console.warn(`  Use --free-dim <name>=<value> to set fixed values.`);
+        console.warn(`  Defaulting unresolved dimensions to 1.`);
+      }
+    }
   }
 
   const result = await convert(buffer, {

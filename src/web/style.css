@@ -68,15 +68,14 @@ header {
 
 .logo {
   display: block;
-  height: 32px;
+  height: 20px;
   width: auto;
 }
 
 .logo-text {
-  font-size: 1.4rem;
-  font-weight: 700;
-  letter-spacing: -.02em;
-  color: var(--accent);
+  display: block;
+  height: 20px;
+  width: 160px;
 }
 
 .header-right {
@@ -204,7 +203,7 @@ main {
   background: var(--bg);
   box-shadow: var(--shadow-inset);
   font-family: var(--font);
-  font-size: .88rem;
+  font-size: .9rem;
   line-height: 1.5;
   color: var(--text);
   transition: box-shadow .25s var(--ease-out);
@@ -226,11 +225,11 @@ main {
   align-items: center;
   justify-content: center;
   gap: .4rem;
-  padding: .25rem 1.3rem;
+  padding: .25rem 1rem;
   border: none;
   font-family: var(--font);
-  font-size: .88rem;
-  font-weight: 600;
+  font-size: .9rem;
+  font-weight: 500;
   cursor: pointer;
   transition: transform .15s var(--ease-out),
               box-shadow .25s var(--ease-out),
@@ -269,7 +268,7 @@ main {
   box-shadow: var(--shadow-inset);
 }
 
-.btn-sm { padding: 0.25rem 1rem; font-size: .82rem; }
+.btn-sm { padding: 0.25rem 0.5rem; font-size: .9rem; width: 60px; }
 
 #coverageWarning {
   padding: .5rem;
@@ -281,7 +280,7 @@ main {
   align-items: center;
   gap: .5rem;
   padding: .7rem 1rem;
-  font-size: .88rem;
+  font-size: .9rem;
   margin-top: 0.5rem;
   animation: fadeSlideIn .35s var(--ease-out) both;
 }
@@ -348,7 +347,7 @@ main {
 .sub-card-title a:hover { text-decoration: underline; }
 
 .sub-card-desc {
-  font-size: .82rem;
+  font-size: .9rem;
   color: var(--text-muted);
 }
 
@@ -436,7 +435,7 @@ main {
 }
 
 .warn-desc {
-  font-size: .82rem;
+  font-size: .9rem;
   color: var(--text-muted);
   margin-bottom: .75rem;
 }
@@ -449,6 +448,7 @@ main {
   background: var(--bg);
   padding: .5rem;
   align-items: center;
+  border-bottom: 1px solid var(--gray);
 }
 
 .tab-bar-right {
@@ -469,11 +469,9 @@ main {
   color: var(--text-muted);
   cursor: pointer;
   transition: color .2s, background .2s;
-  box-shadow: var(--shadow-inset);
 }
 .tab-expand-toggle:hover {
   color: var(--accent);
-  background: rgba(0, 47, 167, .05);
 }
 .tab-expand-toggle:active {
   transform: scale(.95);
@@ -495,8 +493,7 @@ main {
   border: none;
   background: transparent;
   font-family: var(--font);
-  font-size: .82rem;
-  font-weight: 500;
+  font-size: .9rem;
   color: var(--text-muted);
   cursor: pointer;
   transition: background .2s, color .2s, box-shadow .2s, transform .15s;
@@ -539,11 +536,10 @@ main {
   display: flex;
   gap: .4rem;
   align-items: center;
-  padding-right: 1rem;
 }
 
 .btn-download {
-  font-size: .82rem;
+  font-size: .9rem;
 }
 
 #downloadAllBtn {
@@ -660,6 +656,35 @@ footer a:hover {
   }
 }
 
+/* Pad / narrow tablet: stack header vertically */
+@media (max-width: 859px) and (min-width: 601px) {
+  header {
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+
+  .header-left {
+    width: 100%;
+    text-align: center;
+  }
+
+  .header-right {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .download-row {
+    flex-wrap: wrap;
+    justify-content: center;
+    width: 100%;
+  }
+
+  .graph-info {
+    text-align: center;
+    margin-left: 0;
+  }
+}
+
 /* Tablet+: centered → sidebar transition */
 @media (min-width: 860px) {
   /* Initial: upload card centered on page */
@@ -731,7 +756,7 @@ footer a:hover {
 @media (min-width: 1200px) {
   header {
     max-width: 1500px;
-    padding: 0.5rem 1rem;
+    padding: 1rem 1rem 0.7rem 1rem;
   }
 
   main.has-model {
@@ -844,7 +869,7 @@ footer a:hover {
 
 .reader-empty {
   color: var(--text-faint);
-  font-size: .88rem;
+  font-size: .9rem;
   text-align: center;
   padding: 2rem;
 }
@@ -943,7 +968,7 @@ footer a:hover {
 .preview-device-select {
   width: auto;
   flex: none;
-  padding: .35rem .6rem;
+  padding: .25rem .6rem;
   font-size: .8rem;
 }
 
@@ -1036,7 +1061,7 @@ footer a:hover {
 }
 
 .progress-fill.done {
-  background: linear-gradient(90deg, var(--success), #2ecc71);
+  background: linear-gradient(90deg, var(--success), #068906);
   transition: width .3s var(--ease-out), background .4s;
 }
 

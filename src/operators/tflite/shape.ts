@@ -10,46 +10,46 @@ function emitReshape(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
   const output = emitter.declare(node.outputs[0]);
 
-  // Resolve shape values, replacing any -1 with the correct dimension.
-  // WebNN reshape does not support -1; all dims must be unsigned long.
-  function resolveShape(shape: number[]): number[] {
-    const negIdx = shape.indexOf(-1);
-    if (negIdx === -1) return shape;
-    // Use output tensor shape from TFLite metadata
-    const outShape = emitter.tensorShape(node.outputs[0]);
-    if (outShape && outShape.every(d => typeof d === 'number' && d >= 0)) {
-      return outShape as number[];
+  // Get the target shape from the second input tensor (preferred) or options attribute.
+  // TFLite RESHAPE: the second input (constant int32 tensor) takes priority
+  // over the new_shape attribute in ReshapeOptions, which can be stale.
+  function getTargetShape(): number[] | null {
+    if (node.inputs.length > 1) {
+      const shapeValues = emitter.constantIntValues(node.inputs[1]);
+      if (shapeValues && shapeValues.length > 0) return shapeValues;
     }
-    // Fallback: compute -1 dim from input total size
-    const inShape = emitter.tensorShape(node.inputs[0]);
-    if (inShape && inShape.every(d => typeof d === 'number')) {
-      const totalSize = (inShape as number[]).reduce((a, b) => a * b, 1);
-      const knownSize = shape.reduce((a, b) => b >= 0 ? a * b : a, 1);
-      const resolved = [...shape];
-      resolved[negIdx] = totalSize / knownSize;
-      return resolved;
-    }
-    return shape;
+    const newShape = node.attributes.new_shape as number[] | undefined;
+    if (newShape && newShape.length > 0) return newShape;
+    return null;
   }
 
-  // TFLite: new_shape comes from options or second input tensor
-  const newShape = node.attributes.new_shape as number[] | undefined;
-  if (newShape) {
-    const resolved = resolveShape(newShape);
-    emitter.line(`const ${output} = builder.reshape(${input}, [${resolved}]);`);
-  } else if (node.inputs.length > 1) {
-    // Shape is a constant int32 tensor — extract as literal array
-    const shapeValues = emitter.constantIntValues(node.inputs[1]);
-    if (shapeValues) {
-      const resolved = resolveShape(shapeValues);
-      emitter.line(`const ${output} = builder.reshape(${input}, [${resolved}]);`);
-    } else {
+  const targetShape = getTargetShape();
+
+  if (!targetShape) {
+    // Fallback: no shape info
+    if (node.inputs.length > 1) {
       const shapeInput = emitter.ref(node.inputs[1]);
       emitter.line(`const ${output} = builder.reshape(${input}, ${shapeInput});`);
+    } else {
+      emitter.comment('Reshape: no shape info available');
+      emitter.line(`const ${output} = ${input};`);
     }
+    return;
+  }
+
+  const negIdx = targetShape.indexOf(-1);
+
+  if (negIdx === -1) {
+    // No dynamic dim — emit static reshape
+    emitter.line(`const ${output} = builder.reshape(${input}, [${targetShape.join(', ')}]);`);
   } else {
-    emitter.comment('Reshape: no shape info available');
-    emitter.line(`const ${output} = ${input};`);
+    // Has -1: resolve at graph-build time using MLOperand.shape.
+    // WebNN reshape does not support -1; compute the actual dimension from
+    // the input operand's runtime shape so this works with dynamic models.
+    const knownSize = targetShape.reduce((a, b) => b >= 0 ? a * b : a, 1);
+    emitter.line(`const ${output}Shape = [${targetShape.join(', ')}];`);
+    emitter.line(`${output}Shape[${negIdx}] = ${input}.shape.reduce((a, b) => a * b, 1) / ${knownSize};`);
+    emitter.line(`const ${output} = builder.reshape(${input}, ${output}Shape);`);
   }
 }
 

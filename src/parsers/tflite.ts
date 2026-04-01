@@ -306,6 +306,7 @@ class FBReader {
 interface TFLiteTensor {
   name: string;
   shape: number[];
+  shapeSignature?: number[];  // from shape_signature field; -1 = dynamic dim
   type: number;        // TensorType enum value
   buffer: number;      // buffer index
   quantization?: {
@@ -313,6 +314,7 @@ interface TFLiteTensor {
     zeroPoint?: number[];
     min?: number[];
     max?: number[];
+    quantizedDimension?: number;
   };
 }
 
@@ -452,7 +454,8 @@ function readTensors(fb: FBReader, sgOffset: number): TFLiteTensor[] {
 
   for (let i = 0; i < len; i++) {
     const tOffset = fb.indirect(start + i * 4);
-    // Tensor fields: shape(0), type(1), buffer(2), name(3), quantization(4)
+    // Tensor fields: shape(0), type(1), buffer(2), name(3), quantization(4),
+    //                is_variable(5), sparsity(6), shape_signature(7)
     const shape = readIntVector(fb, tOffset, 0);
     const typeField = fb.field(tOffset, 1);
     const type = typeField ? fb.int8(typeField) : 0;
@@ -468,14 +471,18 @@ function readTensors(fb: FBReader, sgOffset: number): TFLiteTensor[] {
       quantization = readQuantization(fb, qOffset);
     }
 
-    tensors.push({ name, shape, type, buffer, quantization });
+    // Read shape_signature (field 7) — indicates dynamic dimensions with -1
+    const sigVec = readIntVector(fb, tOffset, 7);
+    const shapeSignature = sigVec.length > 0 ? sigVec : undefined;
+
+    tensors.push({ name, shape, type, buffer, quantization, shapeSignature });
   }
 
   return tensors;
 }
 
 function readQuantization(fb: FBReader, qOffset: number): TFLiteTensor['quantization'] {
-  // QuantizationParameters fields: min(0), max(1), scale(2), zero_point(3)
+  // QuantizationParameters fields: min(0), max(1), scale(2), zero_point(3), quantized_dimension(4)
   const result: TFLiteTensor['quantization'] = {};
 
   const minField = fb.field(qOffset, 0);
@@ -489,6 +496,11 @@ function readQuantization(fb: FBReader, qOffset: number): TFLiteTensor['quantiza
 
   const zpField = fb.field(qOffset, 3);
   if (zpField) result.zeroPoint = readInt64AsNumberVector(fb, zpField);
+
+  const qdField = fb.field(qOffset, 4);
+  // quantized_dimension defaults to 0 in FlatBuffers (the default value is
+  // omitted from the vtable), so always store it.
+  result.quantizedDimension = qdField ? fb.int32(qdField) : 0;
 
   return result;
 }
@@ -609,7 +621,9 @@ function readDepthwiseConv2DOptions(fb: FBReader, offset: number): Record<string
 
 function readPool2DOptions(fb: FBReader, offset: number): Record<string, unknown> {
   const paddingField = fb.field(offset, 0);
-  const padding = paddingField ? Padding[fb.int8(paddingField)] ?? 'VALID' : 'VALID';
+  // Padding enum: SAME=0, VALID=1. FlatBuffers omits default (0) from vtable,
+  // so when field is absent the default is SAME — matching the Conv2D options.
+  const padding = paddingField ? Padding[fb.int8(paddingField)] ?? 'SAME' : 'SAME';
   const swField = fb.field(offset, 1);
   const stride_w = swField ? fb.int32(swField) : 1;
   const shField = fb.field(offset, 2);
@@ -893,17 +907,48 @@ export async function parseTflite(buffer: Uint8Array): Promise<GraphIR> {
   // Convert tensors
   const tensorNames = sg.tensors.map((t) => t.name || `tensor_${sg.tensors.indexOf(t)}`);
 
+  // Build a mapping from dynamic dim positions (in graph inputs) to symbolic names.
+  // TFLite's shape_signature uses -1 for dynamic dims; shape uses a placeholder (often 1).
+  // We assign symbolic names so the user can provide overrides via freeDimensionOverrides.
+  const dynamicDimNames = new Map<number, string>(); // dim position → name
+  let nextDimId = 0;
+  for (const idx of sg.inputs) {
+    const t = sg.tensors[idx];
+    if (!t.shapeSignature) continue;
+    for (let d = 0; d < t.shapeSignature.length; d++) {
+      if (t.shapeSignature[d] === -1 && !dynamicDimNames.has(d)) {
+        dynamicDimNames.set(d, `dim_${nextDimId++}`);
+      }
+    }
+  }
+
+  /** Convert a tensor shape to (number|string)[] using shape_signature to detect dynamic dims */
+  function toDynamicShape(t: TFLiteTensor): (number | string)[] {
+    if (!t.shapeSignature || dynamicDimNames.size === 0) {
+      return t.shape.length > 0 ? t.shape : [];
+    }
+    return t.shapeSignature.map((s, i) => {
+      if (s === -1) {
+        const name = dynamicDimNames.get(i);
+        return name ?? `dim_${i}`;
+      }
+      return s;
+    });
+  }
+
   // Graph inputs
   const inputs: TensorInfo[] = sg.inputs.map((idx) => {
     const t = sg.tensors[idx];
     return {
       name: tensorNames[idx],
       dataType: tfliteDataTypeFromId(t.type),
-      shape: t.shape.length > 0 ? t.shape : [],
+      shape: toDynamicShape(t),
     };
   });
 
-  // Graph outputs
+  // Graph outputs — use concrete metadata shapes, NOT symbolic dims.
+  // Output dynamic dims (e.g. number of detections) are unrelated to input dynamic
+  // dims (e.g. height/width), so they must not share the same symbolic names.
   const outputs: TensorInfo[] = sg.outputs.map((idx) => {
     const t = sg.tensors[idx];
     return {
@@ -954,6 +999,9 @@ export async function parseTflite(buffer: Uint8Array): Promise<GraphIR> {
           if (t.quantization.zeroPoint?.length) {
             attributes[`input_${localIdx}_zero_point`] = t.quantization.zeroPoint;
           }
+          if (t.quantization.quantizedDimension != null) {
+            attributes[`input_${localIdx}_quantized_dimension`] = t.quantization.quantizedDimension;
+          }
         }
       }
     }
@@ -971,11 +1019,13 @@ export async function parseTflite(buffer: Uint8Array): Promise<GraphIR> {
   }
 
   // Build shapes map for all tensors (including scalars with shape [])
+  // Only graph inputs get symbolic dims; all other tensors use concrete metadata shapes.
+  const inputIndexSet = new Set(sg.inputs);
   const shapes = new Map<string, (number | string)[]>();
   const dataTypes = new Map<string, MLOperandDataType>();
   for (let i = 0; i < sg.tensors.length; i++) {
     const t = sg.tensors[i];
-    shapes.set(tensorNames[i], t.shape);
+    shapes.set(tensorNames[i], inputIndexSet.has(i) ? toDynamicShape(t) : t.shape);
     dataTypes.set(tensorNames[i], tfliteDataTypeFromId(t.type));
   }
 

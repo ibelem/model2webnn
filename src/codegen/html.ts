@@ -59,26 +59,28 @@ export function generateHtml(
   <title>${escapeHtml(title)}</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: system-ui, -apple-system, sans-serif; background: #f8f9fa; color: #1a1a1a; padding: 1rem; }
+    body { font-family: system-ui, -apple-system, sans-serif; background: rgba(0, 47, 167, 0.02); color: #1a1a1a; padding: 1rem; }
     .container { margin: 0 auto; }
     h1 { font-size: 1.5rem; margin-bottom: 0.5rem; }
-    .subtitle { color: #666; margin-bottom: 1.5rem; font-size: 0.9rem; }
-    .card { background: #fff; padding: 1.5rem; margin-bottom: 1rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+    .subtitle { color: #666; margin-bottom: 1rem; font-size: 0.9rem; }
+    .card { background: #fff; padding: 1rem; margin-bottom: 1rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+    .model-info { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.5rem; }
+    @media (max-width: 600px) { .model-info { grid-template-columns: 1fr; } }
     .controls { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; }
     label { font-weight: 600; font-size: 0.9rem; }
-    select { padding: 0.5rem; border: 1px solid #ddd; font-size: 0.9rem; }
-    button { background: rgba(0, 47, 167, 1); color: #fff; border: none; padding: 0.6rem 1.5rem; font-size: 0.9rem; cursor: pointer; }
+    select { padding: 0.16rem 0.5rem; border: 1px solid #ddd; font-size: 0.9rem; }
+    button { background: rgba(0, 47, 167, 1); color: #fff; border: none; padding: 0.25rem 1rem; font-size: 0.9rem; cursor: pointer; }
     button:hover { background: rgba(0, 47, 167, 1); }
     button:disabled { background: #ccc; cursor: not-allowed; }
     .status { padding: 1rem; margin-top: 1rem; font-size: 0.9rem; }
     .status.info { background: #e3f2fd; border-left: 3px solid #2196F3; }
-    .status.success { background: #e8f5e9; border-left: 3px solid #4CAF50; }
+    .status.success { background: #e9f8f0; border-left: 3px solid #068906; }
     .status.error { background: #ffebee; border-left: 3px solid #f44336; }
     table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; font-size: 0.85rem; }
     table tr {display: grid; grid-template-columns: 1fr 1fr 1fr; }
     th, td { text-align: left; padding: 0.5rem; border-bottom: 1px solid #eee; }
     th { color: #666; font-weight: 600; }
-    pre { margin-top: 1rem; background: #f5f5f5; padding: 1rem; overflow-x: auto; font-size: 0.8rem; max-height: 200px; }
+    pre { margin: 0.5rem 0; background: rgba(0, 47, 167, 0.02); padding: 1rem; overflow-x: auto; font-size: 0.8rem; max-height: 200px; }
   </style>
 </head>
 <body>
@@ -100,19 +102,21 @@ export function generateHtml(
     </div>
 
     <div class="card">
-      <h3 style="margin-bottom: 0.5rem;">Model Info</h3>
-      <table>
-        <tr><th>Inputs</th><th>Shape</th><th>Data Type</th></tr>
-${graph.inputs.map((i) => `        <tr><td>${escapeHtml(i.name)}</td><td>${JSON.stringify(i.shape)}</td><td>${i.dataType}</td></tr>`).join('\n')}
-      </table>
-      <table style="margin-top: 1rem;">
-        <tr><th>Outputs</th><th>Shape</th><th>Data Type</th></tr>
-${effectiveOutputs.map((o) => `        <tr><td>${escapeHtml(o.name)}</td><td>${JSON.stringify(o.shape)}</td><td>${o.dataType}</td></tr>`).join('\n')}
-      </table>
+      <h3>Model Info</h3>
+      <div class="model-info">
+        <table>
+          <tr><th>Inputs</th><th>Shape</th><th>Data Type</th></tr>
+  ${graph.inputs.map((i) => `        <tr><td>${escapeHtml(i.name)}</td><td>${JSON.stringify(i.shape)}</td><td>${i.dataType}</td></tr>`).join('\n')}
+        </table>
+        <table>
+          <tr><th>Outputs</th><th>Shape</th><th>Data Type</th></tr>
+  ${effectiveOutputs.map((o) => `        <tr><td>${escapeHtml(o.name)}</td><td>${JSON.stringify(o.shape)}</td><td>${o.dataType}</td></tr>`).join('\n')}
+        </table>
+      </div>
     </div>
 
     <div class="card" id="resultsCard" style="display:none;">
-      <h3 style="margin-bottom: 0.5rem;">Results</h3>
+      <h3>Results</h3>
       <div id="results"></div>
     </div>
   </div>
@@ -169,18 +173,18 @@ async function run() {
       inputs[info.name] = tensor;
     }
 
-    // Create output tensors
+    // Create output tensors — use actual shapes from built graph
     const outputs = {};
     for (const info of OUTPUT_INFO) {
       outputs[info.name] = await context.createTensor({
-        dataType: info.dataType, shape: info.shape.map(d => typeof d === 'number' ? d : 1),
+        dataType: info.dataType, shape: graph.outputShapes[info.name],
         readable: true
       });
     }
 
     statusEl.textContent = 'Running inference...';
     const t0 = performance.now();
-    context.dispatch(graph, inputs, outputs);
+    context.dispatch(graph.graph, inputs, outputs);
 
     // Read results
     const results = {};
@@ -195,7 +199,7 @@ async function run() {
     const runTimes = [];
     for (let i = 0; i < NUM_RUNS; i++) {
       const t0b = performance.now();
-      context.dispatch(graph, inputs, outputs);
+      context.dispatch(graph.graph, inputs, outputs);
       for (const info of OUTPUT_INFO) {
         await context.readTensor(outputs[info.name]);
       }
@@ -220,7 +224,7 @@ async function run() {
     for (const info of OUTPUT_INFO) {
       const data = results[info.name];
       const preview = Array.from(data.slice(0, 10)).map(v => typeof v === 'bigint' ? v.toString() : Number(v).toFixed(6)).join(', ');
-      html += '<h4>' + info.name + ' ' + JSON.stringify(info.shape) + ' (' + info.dataType + ')</h4>';
+      html += '<div>' + info.name + ' ' + JSON.stringify(info.shape) + ' (' + info.dataType + ')</div>';
       html += '<pre>[' + preview + (data.length > 10 ? ', ...' : '') + ']</pre>';
     }
     resultsEl.innerHTML = html;

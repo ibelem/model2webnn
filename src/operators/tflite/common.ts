@@ -97,11 +97,11 @@ export function emitDequantizeIfNeeded(
   }
 
   // Decompose dequantization into cast + sub + mul.
-  // WebNN dequantizeLinear requires scale/zeroPoint to have the same rank as input,
-  // but emitters may reshape tensors (e.g. gemm flattens to rank 2) making the
-  // model shape stale. Using cast + sub + mul with scalar/1-D constants avoids
-  // rank constraints via standard broadcasting.
   // Formula: output = (cast(input, float32) - cast(zeroPoint, float32)) * scale
+  //
+  // For per-channel quantization the scale/zp vector must be reshaped so its
+  // single non-trivial dim aligns with quantized_dimension, otherwise NumPy-
+  // style broadcasting (from the right) will mismatch.
   emitter.comment(`Dequantize ${dtype} → float32`);
   const castVar = `${prefix}_f32`;
   const scaleVar = `${prefix}_scale`;
@@ -109,8 +109,27 @@ export function emitDequantizeIfNeeded(
 
   emitter.line(`const ${castVar} = builder.cast(${varName}, 'float32');`);
 
-  // Scale constant — 1-D or scalar, broadcasting handles rank differences
-  const scaleShape = scaleValues.length === 1 ? '[]' : `[${scaleValues.length}]`;
+  // Determine the shape for per-channel scale/zp constants.
+  // For per-tensor (length 1) use scalar []; for per-channel, reshape to match
+  // the quantized dimension so broadcasting works with any tensor rank.
+  const quantizedDim = node.attributes[`input_${localInputIdx}_quantized_dimension`] as number | undefined;
+  const tensorShape = emitter.tensorShape(tensorName);
+  const tensorRank = tensorShape ? tensorShape.length : 0;
+
+  function broadcastShape(len: number): string {
+    if (len === 1) return '[]';
+    // Per-channel: if we know the tensor rank and quantized dim, reshape to
+    // e.g. [32, 1, 1, 1] so it broadcasts with [32, 3, 3, 12].
+    if (quantizedDim != null && tensorRank > 1) {
+      const shape = new Array(tensorRank).fill(1);
+      shape[quantizedDim] = len;
+      return `[${shape.join(', ')}]`;
+    }
+    // Fallback: 1-D — works when quantized dim is the last dim (default broadcasting)
+    return `[${len}]`;
+  }
+
+  const scaleShape = broadcastShape(scaleValues.length);
   emitter.line(`const ${scaleVar} = builder.constant({dataType: 'float32', shape: ${scaleShape}}, new Float32Array([${scaleValues.join(', ')}]));`);
 
   // Zero-point subtraction (skip if all zeros)
@@ -121,7 +140,7 @@ export function emitDequantizeIfNeeded(
     emitter.line(`const ${dqVar} = builder.mul(${castVar}, ${scaleVar});`);
   } else {
     const zpConstVar = `${prefix}_zpf`;
-    const zpShape = zpArr.length === 1 ? '[]' : `[${zpArr.length}]`;
+    const zpShape = broadcastShape(zpArr.length);
     emitter.line(`const ${zpConstVar} = builder.constant({dataType: 'float32', shape: ${zpShape}}, new Float32Array([${zpArr.map((v) => v.toString()).join(', ')}]));`);
     emitter.line(`const ${dqVar} = builder.mul(builder.sub(${castVar}, ${zpConstVar}), ${scaleVar});`);
   }
