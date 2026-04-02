@@ -22,7 +22,7 @@
   --warn: #e8a838;
   --warn-bg: #fef8ec;
   --success: #3ec78a;
-  --error: #e85454;
+  --error: rgba(255, 0, 129, 1);
   --shadow-up: 0 1px 3px rgba(0, 0, 0, .06);
   --shadow-up-sm: 0 1px 2px rgba(0, 0, 0, .05);
   --shadow-inset: inset 0 1px 2px rgba(0, 0, 0, .06);
@@ -332,6 +332,32 @@ main {
 
 .sub-card--info {
   background: var(--bg);
+}
+
+.sub-card--error {
+  background: var(--error);
+  color: white;
+}
+
+.sub-card--error .sub-card-title, 
+.sub-card--error .sub-card-title a,
+.sub-card--error .free-dim-grid .free-dim-row label,
+.sub-card--error .free-dim-grid .free-dim-row input,
+.sub-card--error .free-dim-grid .free-dim-row input::placeholder,
+.sub-card--error .sub-card-desc {
+  color: white;
+}
+
+.sub-card--error .free-dim-grid .free-dim-row input {
+  border: 1px solid rgba(255, 255, 255, 0.5);
+}
+
+.sub-card--error:hover {
+  background: rgba(230, 0, 116, 1);
+}
+
+.sub-card--error:hover .free-dim-grid .free-dim-row input {
+  border: 1px solid rgba(255, 255, 255, 1);
 }
 
 .sub-card-title {

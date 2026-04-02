@@ -332,7 +332,12 @@ export async function parseOnnx(
   for (const vi of graph.valueInfo ?? []) {
     const name = vi.name ?? '';
     if (name && !shapes.has(name)) {
-      shapes.set(name, extractShape(vi));
+      const viShape = extractShape(vi);
+      // Skip empty shapes from value_info — they indicate unknown rank, not scalar.
+      // True scalars come from constants/initializers which are already in the shapes map.
+      if (viShape.length > 0) {
+        shapes.set(name, viShape);
+      }
       dataTypes.set(name, extractDataType(vi));
     }
   }
@@ -387,15 +392,32 @@ function propagateShapes(
     // Shape-preserving ops: output shape = input shape
     if (SHAPE_PRESERVING_OPS.has(node.opType)) {
       const inputShape = shapes.get(node.inputs[0]);
-      if (!inputShape) continue;
+      if (!inputShape || inputShape.length === 0) continue;
       for (const out of node.outputs) {
         if (!out) continue;
         const existing = shapes.get(out);
-        if (!existing) {
+        if (!existing || existing.length === 0) {
           shapes.set(out, [...inputShape]);
         } else if (!isFullyStatic(existing) && isFullyStatic(inputShape)) {
           // Replace dynamic dims with concrete ones
           shapes.set(out, [...inputShape]);
+        }
+      }
+      continue;
+    }
+
+    // DynamicQuantizeLinear: output[0] has same shape as input, outputs[1,2] are scalar
+    if (node.opType === 'DynamicQuantizeLinear') {
+      const inputShape = shapes.get(node.inputs[0]);
+      if (inputShape && inputShape.length > 0) {
+        const out0 = node.outputs[0];
+        if (out0) {
+          const existing = shapes.get(out0);
+          if (!existing || existing.length === 0) {
+            shapes.set(out0, [...inputShape]);
+          } else if (!isFullyStatic(existing) && isFullyStatic(inputShape)) {
+            shapes.set(out0, [...inputShape]);
+          }
         }
       }
       continue;
@@ -412,11 +434,11 @@ function propagateShapes(
           bestShape = s;
         }
       }
-      if (bestShape) {
+      if (bestShape && bestShape.length > 0) {
         for (const out of node.outputs) {
           if (!out) continue;
           const existing = shapes.get(out);
-          if (!existing) {
+          if (!existing || existing.length === 0) {
             shapes.set(out, [...bestShape]);
           } else if (!isFullyStatic(existing) && isFullyStatic(bestShape)) {
             shapes.set(out, [...bestShape]);
@@ -455,7 +477,7 @@ function propagateShapes(
       for (const out of node.outputs) {
         if (!out) continue;
         const existing = shapes.get(out);
-        if (!existing) {
+        if (!existing || existing.length === 0) {
           shapes.set(out, outShape);
         } else if (!isFullyStatic(existing) && isFullyStatic(outShape)) {
           shapes.set(out, outShape);
@@ -479,7 +501,7 @@ function propagateShapes(
       for (const out of node.outputs) {
         if (!out) continue;
         const existing = shapes.get(out);
-        if (!existing) {
+        if (!existing || existing.length === 0) {
           shapes.set(out, outShape);
         } else if (!isFullyStatic(existing) && isFullyStatic(outShape)) {
           shapes.set(out, outShape);
@@ -503,7 +525,7 @@ function propagateShapes(
       for (const out of node.outputs) {
         if (!out) continue;
         const existing = shapes.get(out);
-        if (!existing) {
+        if (!existing || existing.length === 0) {
           shapes.set(out, outShape);
         } else if (!isFullyStatic(existing) && isFullyStatic(outShape)) {
           shapes.set(out, outShape);
@@ -527,7 +549,7 @@ function propagateShapes(
       for (const out of node.outputs) {
         if (!out) continue;
         const existing = shapes.get(out);
-        if (!existing) {
+        if (!existing || existing.length === 0) {
           shapes.set(out, outShape);
         } else if (!isFullyStatic(existing) && isFullyStatic(outShape)) {
           shapes.set(out, outShape);

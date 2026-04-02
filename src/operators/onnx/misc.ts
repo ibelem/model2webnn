@@ -560,7 +560,7 @@ function emitDynamicQuantizeLinear(node: NodeIR, emitter: CodeEmitter): void {
 
   // ORT: WebNN quantizeLinear requires scale and zeroPoint to have the same rank as input.
   // The scale and zeroPoint are scalar (from reduceMin/reduceMax), so reshape to [1,1,...,1].
-  const inputShape = emitter.tensorShape(node.inputs[0]);
+  const inputShape = emitter.tensorShape(node.inputs[0]) ?? emitter.tensorShape(node.outputs[0]);
   const inputRank = inputShape ? inputShape.length : 0;
   let scaleForQL = scale;
   let zpForQL = zp;

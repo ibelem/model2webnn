@@ -72,6 +72,18 @@ let freeDimDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 /**
  * Show the free dimension override UI controls.
  */
+function updateFreeDimSectionStyle(): void {
+  if (!pendingConversion) return;
+  const section = document.getElementById('freeDimSection')!;
+  const allSet = pendingConversion.freeDims.every((dim) => {
+    const input = document.getElementById(`freeDim_${dim}`) as HTMLInputElement | null;
+    const v = input?.value.trim();
+    return v !== undefined && v !== '' && !isNaN(parseInt(v, 10)) && parseInt(v, 10) >= 1;
+  });
+  section.classList.toggle('sub-card--error', !allSet);
+  section.classList.toggle('sub-card--info', allSet);
+}
+
 function showFreeDimOverrideUI(freeDims: string[]): void {
   const section = document.getElementById('freeDimSection')!;
   const list = document.getElementById('freeDimList')!;
@@ -82,15 +94,17 @@ function showFreeDimOverrideUI(freeDims: string[]): void {
     row.className = 'free-dim-row';
     row.innerHTML = `
       <label for="freeDim_${dim}" title="${dim}">${dim}</label>
-      <input type="number" id="freeDim_${dim}" name="freeDim_${dim}" min="1" placeholder="e.g. 1">
+      <input type="number" id="freeDim_${dim}" name="freeDim_${dim}" min="1" placeholder="">
     `;
     list.appendChild(row);
   }
 
   section.style.display = '';
+  updateFreeDimSectionStyle();
 
   // Auto-regenerate on input change (debounced)
   list.addEventListener('input', () => {
+    updateFreeDimSectionStyle();
     if (freeDimDebounceTimer) clearTimeout(freeDimDebounceTimer);
     freeDimDebounceTimer = setTimeout(() => handleFreeDimConvert(), 600);
   });
