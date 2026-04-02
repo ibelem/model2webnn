@@ -340,12 +340,34 @@ function emitMinMaxMean(node: NodeIR, emitter: CodeEmitter): void {
 // Ported from: reference/microsoft/onnxruntime/core/providers/webnn/builders/impl/qdq_op_builder.cc
 // WebNN signature: builder.dequantizeLinear(input, scale, zeroPoint, options?)
 //                  builder.quantizeLinear(input, scale, zeroPoint, options?)
+
+// WebNN dequantizeLinear only supports [int8, uint8, int4, uint4] as input types.
+const WEBNN_DQL_SUPPORTED_TYPES = new Set(['int8', 'uint8', 'int4', 'uint4']);
+
 function emitQDQ(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
   const scale = emitter.ref(node.inputs[1]);
   const output = emitter.declare(node.outputs[0]);
   const hasZeroPoint = node.inputs.length > 2 && node.inputs[2] !== '';
   const webnnOp = node.opType === 'DequantizeLinear' ? 'dequantizeLinear' : 'quantizeLinear';
+
+  // DEVIATION: WebNN dequantizeLinear does not support int32 (or float16/float32) inputs,
+  // but ONNX DequantizeLinear does (e.g. output of MatMulInteger/ConvInteger).
+  // Decompose manually: output = (cast(input, float32) - cast(zeroPoint, float32)) * scale
+  const inputDtype = emitter.tensorDataType(node.inputs[0]);
+  if (node.opType === 'DequantizeLinear' && inputDtype && !WEBNN_DQL_SUPPORTED_TYPES.has(inputDtype)) {
+    emitter.comment(`DequantizeLinear decomposed: input type '${inputDtype}' not supported by WebNN dequantizeLinear`);
+    const castInput = `${output}_cast_input`;
+    emitter.line(`const ${castInput} = builder.cast(${input}, 'float32');`);
+    if (hasZeroPoint) {
+      const castZp = `${output}_cast_zp`;
+      emitter.line(`const ${castZp} = builder.cast(${emitter.ref(node.inputs[2])}, 'float32');`);
+      emitter.line(`const ${output} = builder.mul(builder.sub(${castInput}, ${castZp}), ${scale});`);
+    } else {
+      emitter.line(`const ${output} = builder.mul(${castInput}, ${scale});`);
+    }
+    return;
+  }
 
   const blockSize = (node.attributes.block_size as number) ?? 0;
   let axis = (node.attributes.axis as number) ?? 1;
@@ -407,7 +429,6 @@ function emitQDQ(node: NodeIR, emitter: CodeEmitter): void {
     // ORT: Create a zero constant with matching type and same shape as (reshaped) scale.
     // DequantizeLinear: zeroPoint type matches input type
     // QuantizeLinear: zeroPoint type matches output type
-    const inputDtype = emitter.tensorDataType(node.inputs[0]);
     const outputDtype = emitter.tensorDataType(node.outputs[0]);
     const zpType = node.opType === 'DequantizeLinear' ? (inputDtype ?? 'uint8') : (outputDtype ?? 'uint8');
     const arrayType = dataTypeToTypedArray(zpType);
