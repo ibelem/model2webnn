@@ -54,6 +54,7 @@ function downloadManifest(): void {
   downloadBlob(blob, `${downloadModelName}.manifest.json`);
 }
 
+
 async function downloadAll(): Promise<void> {
   if (!downloadResult) return;
 
@@ -66,6 +67,9 @@ async function downloadAll(): Promise<void> {
     zip.file(`${downloadModelName}.manifest.json`, JSON.stringify(downloadResult.manifest, null, 2));
     if (downloadResult.html) {
       zip.file(`${downloadModelName}.html`, downloadResult.html);
+    }
+    if (downloadResult.webnnDsl) {
+      zip.file(`${downloadModelName}.webnn`, downloadResult.webnnDsl);
     }
 
     const blob = await zip.generateAsync({ type: 'blob' });

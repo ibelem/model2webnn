@@ -27,7 +27,7 @@ let editor: monaco.editor.IStandaloneCodeEditor | null = null;
 let currentResult: ConvertResult | null = null;
 
 // Tabs that use the Monaco editor vs custom panels
-const editorTabs = new Set(['js', 'html', 'manifest']);
+const editorTabs = new Set(['js', 'html', 'manifest', 'webnn-dsl']);
 const panelIds: Record<string, string> = {
   reader: 'readerPanel',
   mapping: 'mappingPanel',
@@ -142,6 +142,10 @@ function switchEditorContent(tab: string): void {
     case 'html':
       editor.setValue(currentResult.html ?? '<!-- No HTML output -->');
       monaco.editor.setModelLanguage(editor.getModel()!, 'html');
+      break;
+    case 'webnn-dsl':
+      editor.setValue(currentResult.webnnDsl ?? '# No .webnn DSL output');
+      monaco.editor.setModelLanguage(editor.getModel()!, 'plaintext');
       break;
     case 'manifest':
       editor.setValue(JSON.stringify(currentResult.manifest, null, 2));

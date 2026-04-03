@@ -268,18 +268,35 @@ export async function fetchFromUrl(
     const fileName = urlPath.split('/').pop() ?? 'model.onnx';
     const pb = createProgressBar(statusEl, fileName);
 
-    try {
-      buffer = await fetchWithProgress(fetchUrl, pb);
-    } catch (primaryErr) {
-      // If the original URL is from huggingface.co, retry with hf-mirror.com
-      const mirrorUrl = getHuggingFaceMirrorUrl(url);
-      if (mirrorUrl) {
-        const mirrorPb = createProgressBar(statusEl, `${fileName} (via hf-mirror.com)`);
-        effectiveUrl = transformHuggingFaceUrl(mirrorUrl);
-        buffer = await fetchWithProgress(effectiveUrl, mirrorPb);
-        mirrorPb.complete(buffer.byteLength);
-      } else {
-        throw primaryErr;
+    // For HuggingFace URLs, do a fast HEAD pre-check to avoid a slow
+    // GET timeout before falling back to hf-mirror.com.
+    const mirrorUrl = getHuggingFaceMirrorUrl(url);
+    let useMirror = false;
+    if (mirrorUrl) {
+      const reachable = await isReachableViaHead(fetchUrl);
+      if (!reachable) {
+        useMirror = true;
+      }
+    }
+
+    if (useMirror) {
+      const mirrorPb = createProgressBar(statusEl, `${fileName} (via hf-mirror.com)`);
+      effectiveUrl = transformHuggingFaceUrl(mirrorUrl!);
+      buffer = await fetchWithProgress(effectiveUrl, mirrorPb);
+      mirrorPb.complete(buffer.byteLength);
+    } else {
+      try {
+        buffer = await fetchWithProgress(fetchUrl, pb);
+      } catch (primaryErr) {
+        // GET failed — try mirror as last resort
+        if (mirrorUrl) {
+          const mirrorPb = createProgressBar(statusEl, `${fileName} (via hf-mirror.com)`);
+          effectiveUrl = transformHuggingFaceUrl(mirrorUrl);
+          buffer = await fetchWithProgress(effectiveUrl, mirrorPb);
+          mirrorPb.complete(buffer.byteLength);
+        } else {
+          throw primaryErr;
+        }
       }
     }
 
@@ -548,4 +565,21 @@ function getHuggingFaceMirrorUrl(url: string): string | null {
     // ignore
   }
   return null;
+}
+
+/**
+ * Quick reachability check using HTTP HEAD with a short timeout.
+ * Returns true if the host responds (any 2xx/3xx), false on timeout or network error.
+ */
+async function isReachableViaHead(url: string, timeoutMs = 5000): Promise<boolean> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { method: 'HEAD', signal: controller.signal });
+    return res.ok || (res.status >= 300 && res.status < 400);
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
 }

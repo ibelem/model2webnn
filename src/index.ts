@@ -9,6 +9,7 @@ import { packWeights } from './weights/packer.js';
 import { generateJavaScriptFixed } from './codegen/javascript.js';
 import { generateTypeScript } from './codegen/typescript.js';
 import { generateHtml } from './codegen/html.js';
+import { generateWebnnDsl } from './codegen/webnn-dsl.js';
 import { getEmitter } from './operators/registry.js';
 import type { WeightsManifest } from './weights/packer.js';
 
@@ -50,6 +51,8 @@ export interface ConvertResult {
   weights: Uint8Array;
   manifest: WeightsManifest;
   html?: string;
+  /** WebNN DSL text (.webnn format) */
+  webnnDsl: string;
   graph: GraphIR;
   /** Operator coverage analysis — which ops are supported vs unsupported */
   coverage: OperatorCoverage;
@@ -129,6 +132,9 @@ export async function convert(
       break;
   }
 
+  // Generate WebNN DSL
+  const webnnDsl = generateWebnnDsl(graph);
+
   // Validate operator coverage
   const coverage = validateOperatorCoverage(graph);
 
@@ -137,6 +143,7 @@ export async function convert(
     weights: packed.weights,
     manifest: packed.manifest,
     html,
+    webnnDsl,
     graph,
     coverage,
     unresolvedFreeDims,
