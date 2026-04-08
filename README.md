@@ -29,6 +29,14 @@ model2webnn parses `.onnx` and `.tflite` model files and generates self-containe
 https://ibelem.github.io/model2webnn?url=https://huggingface.co/webnn/mobilenet-v2/resolve/main/onnx/model_fp16.onnx
 ```
 
+**URL with dimension overrides** — add `&dim=name:value` to pre-fill symbolic dimensions and auto-convert:
+
+```
+https://ibelem.github.io/model2webnn?url=https://example.com/text_model.onnx&dim=batch_size:1&dim=sequence_length:77
+```
+
+Dimension values sync back to the URL as you change them in the UI.
+
 ### CLI
 
 ```bash
@@ -163,6 +171,14 @@ npx tsx src/cli.ts model.onnx -d batch_size=1 -d sequence_length=128
 ```
 
 In the web UI, input fields appear for each symbolic dimension. Entering a value auto-regenerates the code. Leaving a field empty keeps the symbolic name.
+
+When using URL parameters, add `&dim=name:value` for each dimension (see [Web UI](#web-ui) above). Common examples:
+
+| Model type | Typical overrides |
+|------------|------------------|
+| CLIP text encoder | `batch_size:1`, `sequence_length:77` |
+| LLM / transformer | `batch_size:1`, `sequence_length:128` |
+| Image classifier | `batch_size:1` |
 
 See [ONNX Runtime freeDimensionOverrides](https://webnn.io/en/learn/tutorials/onnx-runtime/free-dimension-overrides).
 
