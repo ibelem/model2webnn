@@ -75,8 +75,16 @@ function emitReshape(node: NodeIR, emitter: CodeEmitter): void {
       emitter.line(`const ${output} = builder.reshape(${input}, ${shape});`);
     }
   } else {
-    const shape = emitter.ref(node.inputs[1]);
-    emitter.line(`const ${output} = builder.reshape(${input}, ${shape});`);
+    // Dynamic shape input (not a constant initializer) — try to use the statically-resolved
+    // output shape from propagateShapes, which folds Shape/Slice/Concat chains at parse time.
+    const outputShape = emitter.tensorShape(node.outputs[0]);
+    if (outputShape && outputShape.length > 0 && outputShape.every((d): d is number => typeof d === 'number' && d >= 0)) {
+      emitter.line(`const ${output} = builder.reshape(${input}, [${outputShape.join(', ')}]);`);
+    } else {
+      emitter.comment(`WARNING: Dynamic reshape with unresolved shape — marking dead`);
+      emitter.line(`const ${output} = undefined; // dead`);
+      emitter.markDead(node.outputs[0]);
+    }
   }
 }
 
@@ -404,6 +412,33 @@ function emitTile(node: NodeIR, emitter: CodeEmitter): void {
 // clip_op_builder.cc → clamp
 // ORT extracts scalar float values for min/max via GetClipMinMax.
 // WebNN clamp expects MLNumber (scalar), not MLOperand.
+
+/** Decode a scalar float16 stored as 2 little-endian bytes into a JS number. */
+function decodeFloat16(raw: Uint8Array): number {
+  const u16 = raw[0] | (raw[1] << 8);
+  const sign = (u16 >> 15) ? -1 : 1;
+  const exp = (u16 >> 10) & 0x1f;
+  const mantissa = u16 & 0x3ff;
+  if (exp === 0x1f) return mantissa ? NaN : sign * Infinity;
+  if (exp === 0) return sign * Math.pow(2, -14) * (mantissa / 1024);
+  return sign * Math.pow(2, exp - 15) * (1 + mantissa / 1024);
+}
+
+/** Extract a scalar number from a constant tensor (supports float32 and float16). */
+function extractScalarClampValue(emitter: CodeEmitter, tensorName: string): number | null {
+  const raw = emitter.constantRawData(tensorName);
+  if (!raw) return null;
+  if (raw.byteLength === 4) {
+    const aligned = new ArrayBuffer(4);
+    new Uint8Array(aligned).set(raw);
+    return new Float32Array(aligned)[0];
+  }
+  if (raw.byteLength === 2) {
+    return decodeFloat16(raw);
+  }
+  return null;
+}
+
 function emitClip(node: NodeIR, emitter: CodeEmitter): void {
   const input = emitter.ref(node.inputs[0]);
   const output = emitter.declare(node.outputs[0]);
@@ -414,11 +449,8 @@ function emitClip(node: NodeIR, emitter: CodeEmitter): void {
   const opts: string[] = [];
   if (hasMin) {
     if (emitter.isConstant(node.inputs[1])) {
-      const raw = emitter.constantRawData(node.inputs[1]);
-      if (raw && raw.byteLength >= 4) {
-        const aligned = new ArrayBuffer(raw.byteLength);
-        new Uint8Array(aligned).set(raw);
-        const val = new Float32Array(aligned)[0];
+      const val = extractScalarClampValue(emitter, node.inputs[1]);
+      if (val !== null) {
         opts.push(`minValue: ${val}`);
       } else {
         opts.push(`minValue: ${emitter.ref(node.inputs[1])}`);
@@ -429,11 +461,8 @@ function emitClip(node: NodeIR, emitter: CodeEmitter): void {
   }
   if (hasMax) {
     if (emitter.isConstant(node.inputs[2])) {
-      const raw = emitter.constantRawData(node.inputs[2]);
-      if (raw && raw.byteLength >= 4) {
-        const aligned = new ArrayBuffer(raw.byteLength);
-        new Uint8Array(aligned).set(raw);
-        const val = new Float32Array(aligned)[0];
+      const val = extractScalarClampValue(emitter, node.inputs[2]);
+      if (val !== null) {
         opts.push(`maxValue: ${val}`);
       } else {
         opts.push(`maxValue: ${emitter.ref(node.inputs[2])}`);

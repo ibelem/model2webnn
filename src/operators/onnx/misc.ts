@@ -525,15 +525,19 @@ function emitDynamicQuantizeLinear(node: NodeIR, emitter: CodeEmitter): void {
   emitter.line(`const ${qMin} = builder.constant({dataType: 'float32', shape: []}, new Float32Array([0]));`);
   emitter.line(`const ${qMax} = builder.constant({dataType: 'float32', shape: []}, new Float32Array([255]));`);
 
-  // X_Min = ReduceMin(x), X_Min_Adjusted = Min(X_Min, Q_Min)
+  // ORT: WebNN quantizeLinear requires scale and zeroPoint to have the same rank as input.
+  // Use keepDimensions: true so reduceMin/Max produce same-rank tensors as input (all dims = 1).
+  // This avoids needing to know the input rank at codegen time (some tensors lack shape in value_info).
+
+  // X_Min = ReduceMin(x, keepDimensions=true), X_Min_Adjusted = Min(X_Min, Q_Min)
   const xMin = `${y}_x_min`;
-  emitter.line(`const ${xMin} = builder.reduceMin(${input});`);
+  emitter.line(`const ${xMin} = builder.reduceMin(${input}, { keepDimensions: true });`);
   const xMinAdj = `${y}_x_min_adj`;
   emitter.line(`const ${xMinAdj} = builder.min(${xMin}, ${qMin});`);
 
-  // X_Max = ReduceMax(x), X_Max_Adjusted = Max(X_Max, Q_Min)
+  // X_Max = ReduceMax(x, keepDimensions=true), X_Max_Adjusted = Max(X_Max, Q_Min)
   const xMax = `${y}_x_max`;
-  emitter.line(`const ${xMax} = builder.reduceMax(${input});`);
+  emitter.line(`const ${xMax} = builder.reduceMax(${input}, { keepDimensions: true });`);
   const xMaxAdj = `${y}_x_max_adj`;
   emitter.line(`const ${xMaxAdj} = builder.max(${xMax}, ${qMin});`);
 
@@ -558,23 +562,10 @@ function emitDynamicQuantizeLinear(node: NodeIR, emitter: CodeEmitter): void {
   const zp = `${y}_zp`;
   emitter.line(`const ${zp} = builder.cast(${roundedZp}, 'uint8');`);
 
-  // ORT: WebNN quantizeLinear requires scale and zeroPoint to have the same rank as input.
-  // The scale and zeroPoint are scalar (from reduceMin/reduceMax), so reshape to [1,1,...,1].
-  const inputShape = emitter.tensorShape(node.inputs[0]) ?? emitter.tensorShape(node.outputs[0]);
-  const inputRank = inputShape ? inputShape.length : 0;
-  let scaleForQL = scale;
-  let zpForQL = zp;
-  if (inputRank > 0) {
-    const targetShape = Array(inputRank).fill(1);
-    scaleForQL = `${y}_scale_reshaped`;
-    emitter.line(`const ${scaleForQL} = builder.reshape(${scale}, [${targetShape.join(', ')}]);`);
-    zpForQL = `${y}_zp_reshaped`;
-    emitter.line(`const ${zpForQL} = builder.reshape(${zp}, [${targetShape.join(', ')}]);`);
-  }
-
+  // scale and zp already have the same rank as input (via keepDimensions: true).
   // y = quantizeLinear(x, scale, zeroPoint)
-  emitter.line(`const ${y} = builder.quantizeLinear(${input}, ${scaleForQL}, ${zpForQL});`);
-  // Output the original (non-reshaped) scale and zeroPoint as the DynamicQuantizeLinear outputs
+  emitter.line(`const ${y} = builder.quantizeLinear(${input}, ${scale}, ${zp});`);
+  // Output the scale and zeroPoint as the DynamicQuantizeLinear outputs
   if (yScale) emitter.line(`const ${yScale} = ${scale};`);
   if (yZp) emitter.line(`const ${yZp} = ${zp};`);
 }

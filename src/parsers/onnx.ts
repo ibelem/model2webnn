@@ -344,7 +344,7 @@ export async function parseOnnx(
 
   // Propagate shapes through shape-preserving ops when value_info is missing.
   // QDQ models often lack value_info for intermediate QuantizeLinear/DequantizeLinear outputs.
-  propagateShapes(nodes, shapes, dataTypes);
+  propagateShapes(nodes, shapes, dataTypes, constants);
 
   return {
     name: graph.name || 'model',
@@ -365,11 +365,13 @@ export async function parseOnnx(
  */
 const SHAPE_PRESERVING_OPS = new Set([
   'QuantizeLinear', 'DequantizeLinear',
+  'BatchNormalization', 'LayerNormalization', 'GroupNormalization', 'InstanceNormalization',
   'Relu', 'Sigmoid', 'Tanh', 'Elu', 'Gelu', 'HardSigmoid', 'HardSwish',
   'LeakyRelu', 'Softplus', 'Softsign',
   'Abs', 'Ceil', 'Cos', 'Erf', 'Exp', 'Floor', 'Identity', 'Log',
   'Neg', 'Reciprocal', 'Round', 'Sign', 'Sin', 'Sqrt', 'Tan', 'Not',
-  'Cast', 'Dropout', 'Clip',
+  'Cast', 'Dropout', 'Clip', 'Softmax', 'LogSoftmax',
+  'Flatten',
 ]);
 
 // Element-wise ops where output shape = broadcast(input shapes)
@@ -383,11 +385,246 @@ function isFullyStatic(shape: (number | string)[]): boolean {
   return shape.every(d => typeof d === 'number');
 }
 
+/**
+ * Build a map from tensor name → int64 values for all constant tensors of type int64.
+ * Covers initializers and ONNX Constant op outputs.
+ */
+function buildConstInt64Map(constants: ConstantInfo[]): Map<string, bigint[]> {
+  const map = new Map<string, bigint[]>();
+  for (const c of constants) {
+    if (c.dataType !== 'int64') continue;
+    const view = new DataView(c.rawData.buffer, c.rawData.byteOffset, c.rawData.byteLength);
+    const count = c.rawData.byteLength / 8;
+    const vals: bigint[] = [];
+    for (let i = 0; i < count; i++) {
+      vals.push(view.getBigInt64(i * 8, true)); // little-endian
+    }
+    map.set(c.name, vals);
+  }
+  return map;
+}
+
+/**
+ * Attempt to statically evaluate an int64 tensor to a concrete array of bigint values.
+ * Recursively traces Shape, Slice, Concat, Gather, Unsqueeze/Reshape, Mul ops.
+ * Returns null if any input is unknown or the op is not handled.
+ */
+function evalIntTensor(
+  tensorName: string,
+  producerMap: Map<string, NodeIR>,
+  constInt64: Map<string, bigint[]>,
+  shapes: Map<string, (number | string)[]>,
+  cache: Map<string, bigint[] | null>,
+  depth = 0,
+): bigint[] | null {
+  if (depth > 30) return null;
+  if (cache.has(tensorName)) return cache.get(tensorName) ?? null;
+
+  const direct = constInt64.get(tensorName);
+  if (direct) { cache.set(tensorName, direct); return direct; }
+
+  const producer = producerMap.get(tensorName);
+  if (!producer) { cache.set(tensorName, null); return null; }
+
+  const rec = (name: string): bigint[] | null =>
+    evalIntTensor(name, producerMap, constInt64, shapes, cache, depth + 1);
+
+  let result: bigint[] | null = null;
+
+  // Constant op (opset 9+): value stored directly in node attribute
+  if (producer.opType === 'Constant') {
+    const t = producer.attributes.value as { dataType?: string; rawData?: Uint8Array; int64Data?: bigint[]; int32Data?: number[]; floatData?: number[] } | undefined;
+    if (t?.int64Data) {
+      result = t.int64Data;
+    } else if (t?.int32Data) {
+      result = t.int32Data.map(BigInt);
+    } else if (t?.rawData && (t?.dataType === 'int64' || t?.dataType === 'int32')) {
+      const view = new DataView(t.rawData.buffer, t.rawData.byteOffset, t.rawData.byteLength);
+      const isI64 = t.dataType === 'int64';
+      const stride = isI64 ? 8 : 4;
+      const count = t.rawData.byteLength / stride;
+      result = Array.from({ length: count }, (_, i) =>
+        isI64 ? view.getBigInt64(i * stride, true) : BigInt(view.getInt32(i * stride, true)),
+      );
+    }
+    cache.set(tensorName, result);
+    return result;
+  }
+
+  if (producer.opType === 'Shape') {
+    const inputShape = shapes.get(producer.inputs[0]);
+    if (inputShape && inputShape.length > 0 && inputShape.every(d => typeof d === 'number' && (d as number) >= 0)) {
+      result = (inputShape as number[]).map(BigInt);
+    }
+  } else if (producer.opType === 'Slice') {
+    const data = rec(producer.inputs[0]);
+    if (!data) { cache.set(tensorName, null); return null; }
+    const starts = rec(producer.inputs[1]);
+    const ends = rec(producer.inputs[2]);
+    if (!starts || !ends) { cache.set(tensorName, null); return null; }
+    const axesVals = producer.inputs[3] ? rec(producer.inputs[3]) : null;
+    const stepsVals = producer.inputs[4] ? rec(producer.inputs[4]) : null;
+    // Only handle single-axis slice on a 1D data array
+    const axis = axesVals ? Number(axesVals[0]) : 0;
+    const normalAxis = axis < 0 ? axis + data.length : axis;
+    if (normalAxis !== 0) { cache.set(tensorName, null); return null; }
+    const start = Math.max(0, Number(starts[0]) < 0 ? data.length + Number(starts[0]) : Math.min(Number(starts[0]), data.length));
+    const end = Math.min(data.length, Number(ends[0]) < 0 ? data.length + Number(ends[0]) : Math.min(Number(ends[0]), data.length));
+    const step = stepsVals ? Number(stepsVals[0]) : 1;
+    result = [];
+    for (let i = start; i < end; i += step) result.push(data[i]);
+  } else if (producer.opType === 'Concat') {
+    const axisAttr = (producer.attributes.axis as number) ?? 0;
+    if (axisAttr !== 0) { cache.set(tensorName, null); return null; }
+    const parts: bigint[] = [];
+    for (const inp of producer.inputs) {
+      if (!inp) { cache.set(tensorName, null); return null; }
+      const vals = rec(inp);
+      if (!vals) { cache.set(tensorName, null); return null; }
+      parts.push(...vals);
+    }
+    result = parts;
+  } else if (producer.opType === 'Gather') {
+    const data = rec(producer.inputs[0]);
+    if (!data) { cache.set(tensorName, null); return null; }
+    const idxVals = rec(producer.inputs[1]);
+    if (!idxVals) { cache.set(tensorName, null); return null; }
+    const idx = Number(idxVals[0]);
+    const normalIdx = idx < 0 ? idx + data.length : idx;
+    if (normalIdx < 0 || normalIdx >= data.length) { cache.set(tensorName, null); return null; }
+    result = [data[normalIdx]];
+  } else if (producer.opType === 'Unsqueeze' || producer.opType === 'Reshape' || producer.opType === 'Squeeze' || producer.opType === 'Flatten') {
+    result = rec(producer.inputs[0]);
+  } else if (producer.opType === 'Mul') {
+    const a = rec(producer.inputs[0]);
+    const b = rec(producer.inputs[1]);
+    if (!a || !b) { cache.set(tensorName, null); return null; }
+    if (a.length === 1 && b.length >= 1) result = b.map(v => a[0] * v);
+    else if (b.length === 1 && a.length >= 1) result = a.map(v => v * b[0]);
+    else if (a.length === b.length) result = a.map((v, i) => v * b[i]);
+  }
+
+  cache.set(tensorName, result);
+  return result;
+}
+
+/**
+ * Resolve ONNX reshape special values in-place:
+ *  0  → copy from input dim at same axis (when allowZero=0)
+ * -1  → infer from total element count
+ * Returns null if resolution fails.
+ */
+function resolveReshapeShapeLocal(
+  targetShape: number[],
+  inputShape: (number | string)[],
+  allowZero: number,
+): number[] | null {
+  const resolved = [...targetShape];
+  const inputDims = inputShape.length > 0 && inputShape.every(d => typeof d === 'number') ? inputShape as number[] : null;
+
+  if (!allowZero && inputDims) {
+    for (let i = 0; i < resolved.length; i++) {
+      if (resolved[i] === 0 && i < inputDims.length) resolved[i] = inputDims[i];
+    }
+  }
+  const inferIdx = resolved.indexOf(-1);
+  if (inferIdx !== -1) {
+    if (!inputDims) return null;
+    const totalInput = inputDims.reduce((a, b) => a * b, 1);
+    const knownProduct = resolved.reduce((a, b, i) => (i === inferIdx ? a : a * b), 1);
+    if (knownProduct <= 0) return null;
+    resolved[inferIdx] = totalInput / knownProduct;
+  }
+  if (resolved.some(d => d < 0 || !Number.isInteger(d))) return null;
+  return resolved;
+}
+
+/**
+ * Compute the broadcast output shape for element-wise ops.
+ * Prefers dynamic (string) dims over 1, and prefers larger concrete dims over 1.
+ * This avoids the SE-block pattern (Mul of [B,C,H,W] and [1,C,1,1]) producing wrong [1,C,1,1].
+ */
+function computeBroadcastShape(
+  inputShapes: ((number | string)[])[],
+): (number | string)[] | null {
+  const valid = inputShapes.filter(s => s && s.length > 0);
+  if (valid.length === 0) return null;
+
+  const maxRank = Math.max(...valid.map(s => s.length));
+  // Pad from the left with 1 to align ranks
+  const padded = valid.map(s => {
+    const pad = maxRank - s.length;
+    return [...Array(pad).fill(1), ...s] as (number | string)[];
+  });
+
+  const result: (number | string)[] = [];
+  for (let i = 0; i < maxRank; i++) {
+    let outDim: number | string = 1;
+    for (const s of padded) {
+      const d = s[i];
+      if (typeof d === 'string') {
+        // String (dynamic) dim dominates 1, but if outDim is already a concrete
+        // number > 1, keep the concrete number (both should resolve to same value)
+        if (outDim === 1) outDim = d;
+        // else keep the existing outDim (string or larger concrete number)
+      } else if (typeof outDim === 'number') {
+        // Both concrete: take the larger (handles 1-broadcasting)
+        if ((d as number) > outDim) outDim = d;
+      }
+      // if outDim is already a string, don't override with a number
+    }
+    result.push(outDim);
+  }
+  return result;
+}
+
+/**
+ * Returns true if `candidate` is a better shape than `existing` for the same tensor.
+ * Better means: same rank AND at least one dim is more specific (concrete number or named
+ * free-dim symbol like 'batch_size' rather than an anonymous 'unk__*' symbol).
+ * This allows propagation to replace value_info's anonymous unk symbols with
+ * named free dims propagated forward from graph inputs.
+ */
+function isBetterShape(
+  existing: (number | string)[],
+  candidate: (number | string)[],
+): boolean {
+  if (candidate.length !== existing.length) return false;
+  let gain = false;
+  for (let i = 0; i < existing.length; i++) {
+    const e = existing[i];
+    const c = candidate[i];
+    if (e === c) continue;
+    // Existing is anonymous symbol (unk__*), candidate is concrete or named — gain
+    if (typeof e === 'string' && e.startsWith('unk__') &&
+        (typeof c === 'number' || (typeof c === 'string' && !c.startsWith('unk__')))) {
+      gain = true;
+      continue;
+    }
+    // Existing is concrete but candidate is not — regression, reject
+    if (typeof e === 'number' && typeof c !== 'number') return false;
+    // Existing is named symbol, candidate is anonymous — regression, reject
+    if (typeof e === 'string' && !e.startsWith('unk__') && typeof c === 'string' && c.startsWith('unk__')) return false;
+  }
+  return gain;
+}
+
 function propagateShapes(
   nodes: NodeIR[],
   shapes: Map<string, (number | string)[]>,
   _dataTypes: Map<string, MLOperandDataType>,
+  constants: ConstantInfo[] = [],
+  forceUpdate = false,
 ): void {
+  // Build lookup tables for constant-folding dynamic shape inputs (Reshape)
+  const constInt64 = buildConstInt64Map(constants);
+  const producerMap = new Map<string, NodeIR>();
+  for (const node of nodes) {
+    for (const out of node.outputs) {
+      if (out) producerMap.set(out, node);
+    }
+  }
+  const evalCache = new Map<string, bigint[] | null>();
   for (const node of nodes) {
     // Shape-preserving ops: output shape = input shape
     if (SHAPE_PRESERVING_OPS.has(node.opType)) {
@@ -398,8 +635,7 @@ function propagateShapes(
         const existing = shapes.get(out);
         if (!existing || existing.length === 0) {
           shapes.set(out, [...inputShape]);
-        } else if (!isFullyStatic(existing) && isFullyStatic(inputShape)) {
-          // Replace dynamic dims with concrete ones
+        } else if (isBetterShape(existing, inputShape) || (forceUpdate || !isFullyStatic(existing)) && isFullyStatic(inputShape)) {
           shapes.set(out, [...inputShape]);
         }
       }
@@ -415,7 +651,7 @@ function propagateShapes(
           const existing = shapes.get(out0);
           if (!existing || existing.length === 0) {
             shapes.set(out0, [...inputShape]);
-          } else if (!isFullyStatic(existing) && isFullyStatic(inputShape)) {
+          } else if ((forceUpdate || !isFullyStatic(existing)) && isFullyStatic(inputShape)) {
             shapes.set(out0, [...inputShape]);
           }
         }
@@ -423,25 +659,33 @@ function propagateShapes(
       continue;
     }
 
-    // Element-wise binary ops: use the input with the most concrete shape info
+    // Element-wise binary ops: compute broadcast shape from all inputs
     if (ELEMENTWISE_OPS.has(node.opType)) {
-      let bestShape: (number | string)[] | null = null;
-      for (const inp of node.inputs) {
-        const s = inp ? shapes.get(inp) : null;
-        if (!s) continue;
-        if (!bestShape || (isFullyStatic(s) && !isFullyStatic(bestShape)) ||
-            (s.length > bestShape.length)) {
-          bestShape = s;
-        }
-      }
-      if (bestShape && bestShape.length > 0) {
+      const inputShapes = node.inputs
+        .filter(inp => inp)
+        .map(inp => shapes.get(inp!) ?? null)
+        .filter(s => s !== null) as (number | string)[][];
+      const broadcastShape = computeBroadcastShape(inputShapes);
+      if (broadcastShape && broadcastShape.length > 0) {
         for (const out of node.outputs) {
           if (!out) continue;
           const existing = shapes.get(out);
+          // Only set if missing, or if the broadcast shape provides more info
+          // (higher rank or more concrete dims without losing spatial information)
           if (!existing || existing.length === 0) {
-            shapes.set(out, [...bestShape]);
-          } else if (!isFullyStatic(existing) && isFullyStatic(bestShape)) {
-            shapes.set(out, [...bestShape]);
+            shapes.set(out, broadcastShape);
+          } else if (isBetterShape(existing, broadcastShape)) {
+            shapes.set(out, broadcastShape);
+          } else if (broadcastShape.length > existing.length) {
+            shapes.set(out, broadcastShape);
+          } else if ((forceUpdate || !isFullyStatic(existing)) && isFullyStatic(broadcastShape) &&
+                     broadcastShape.every((d, i) => {
+                       const e = existing[i];
+                       return typeof e !== 'number' || e <= 1 || d === e;
+                     })) {
+            // Only replace with a static shape if it doesn't disagree with existing
+            // concrete dims (avoids replacing [B,C,8,8] with [1,C,1,1])
+            shapes.set(out, broadcastShape);
           }
         }
       }
@@ -479,7 +723,7 @@ function propagateShapes(
         const existing = shapes.get(out);
         if (!existing || existing.length === 0) {
           shapes.set(out, outShape);
-        } else if (!isFullyStatic(existing) && isFullyStatic(outShape)) {
+        } else if ((forceUpdate || !isFullyStatic(existing)) && isFullyStatic(outShape)) {
           shapes.set(out, outShape);
         }
       }
@@ -503,7 +747,7 @@ function propagateShapes(
         const existing = shapes.get(out);
         if (!existing || existing.length === 0) {
           shapes.set(out, outShape);
-        } else if (!isFullyStatic(existing) && isFullyStatic(outShape)) {
+        } else if ((forceUpdate || !isFullyStatic(existing)) && isFullyStatic(outShape)) {
           shapes.set(out, outShape);
         }
       }
@@ -527,7 +771,60 @@ function propagateShapes(
         const existing = shapes.get(out);
         if (!existing || existing.length === 0) {
           shapes.set(out, outShape);
-        } else if (!isFullyStatic(existing) && isFullyStatic(outShape)) {
+        } else if ((forceUpdate || !isFullyStatic(existing)) && isFullyStatic(outShape)) {
+          shapes.set(out, outShape);
+        }
+      }
+      continue;
+    }
+
+    // Gather: output shape = indices_shape + data_shape[1:]
+    // This covers embedding lookups: Gather(embed_table, input_ids) → [*input_ids_shape, embed_dim]
+    if (node.opType === 'Gather') {
+      const dataShape = shapes.get(node.inputs[0]);
+      const idxShape = shapes.get(node.inputs[1]);
+      if (!dataShape || dataShape.length === 0 || !idxShape) continue;
+      const axis = (node.attributes.axis as number) ?? 0;
+      const normalAxis = axis < 0 ? axis + dataShape.length : axis;
+      // Output shape: replace axis dim in dataShape with idxShape dims
+      const outShape: (number | string)[] = [
+        ...dataShape.slice(0, normalAxis),
+        ...idxShape,
+        ...dataShape.slice(normalAxis + 1),
+      ];
+      for (const out of node.outputs) {
+        if (!out) continue;
+        const existing = shapes.get(out);
+        if (!existing || existing.length === 0) {
+          shapes.set(out, outShape);
+        } else if (isBetterShape(existing, outShape)) {
+          shapes.set(out, outShape);
+        } else if ((forceUpdate || !isFullyStatic(existing)) && isFullyStatic(outShape)) {
+          shapes.set(out, outShape);
+        }
+      }
+      continue;
+    }
+
+    // MatMul: output shape = [*batch_dims, M, N]
+    // Propagates batch dims from first input (e.g. [batch, seq, M] × [M, N] → [batch, seq, N])
+    if (node.opType === 'MatMul') {
+      const aShape = shapes.get(node.inputs[0]);
+      const bShape = shapes.get(node.inputs[1]);
+      if (!aShape || aShape.length < 2 || !bShape || bShape.length < 1) continue;
+      const N = bShape[bShape.length - 1];
+      // Batch dims from A (all but last 2 dims when rank>2, or nothing when rank=2)
+      const batchDims = aShape.length > 2 ? aShape.slice(0, aShape.length - 2) : (aShape.length === 2 ? [] : aShape.slice(0, -1));
+      const M = aShape[aShape.length - 2];
+      const outShape: (number | string)[] = [...batchDims, M, N];
+      for (const out of node.outputs) {
+        if (!out) continue;
+        const existing = shapes.get(out);
+        if (!existing || existing.length === 0) {
+          shapes.set(out, outShape);
+        } else if (isBetterShape(existing, outShape)) {
+          shapes.set(out, outShape);
+        } else if ((forceUpdate || !isFullyStatic(existing)) && isFullyStatic(outShape)) {
           shapes.set(out, outShape);
         }
       }
@@ -551,23 +848,142 @@ function propagateShapes(
         const existing = shapes.get(out);
         if (!existing || existing.length === 0) {
           shapes.set(out, outShape);
-        } else if (!isFullyStatic(existing) && isFullyStatic(outShape)) {
+        } else if ((forceUpdate || !isFullyStatic(existing)) && isFullyStatic(outShape)) {
           shapes.set(out, outShape);
         }
       }
       continue;
     }
 
-    // Reshape: output shape from constant shape input
+    // Reshape: try to resolve output shape using constant-folded shape input
     if (node.opType === 'Reshape') {
       const shapeInput = node.inputs[1];
       if (!shapeInput) continue;
-      // The shape tensor itself is a 1D constant; get its values from the constants.
-      // We can't easily read constant values here, but if the output already has
-      // shape info from value_info, that's used. This handles Flatten, which is
-      // shape-preserving in rank only — skip for now.
-      // However, if the output has shape info, prefer more concrete version.
+      const inputShape = shapes.get(node.inputs[0]) ?? null;
+      // Evaluate the shape tensor using constant folding (handles Shape/Slice/Concat chains)
+      const shapeVals = evalIntTensor(shapeInput, producerMap, constInt64, shapes, evalCache);
+      if (!shapeVals) continue;
+      const allowZero = (node.attributes.allowzero as number) ?? 0;
+      // resolveReshapeShapeLocal only needs inputShape when target has 0 or -1 dims;
+      // if neither is present, pass null (it's still resolved correctly).
+      const resolved = resolveReshapeShapeLocal(
+        shapeVals.map(Number),
+        inputShape ?? [],
+        allowZero,
+      );
+      if (!resolved) continue;
+      // Always trust evalIntTensor result: it's constant-folded from the actual
+      // shape-computation graph and supersedes any earlier propagation estimate.
+      for (const out of node.outputs) {
+        if (out) shapes.set(out, resolved);
+      }
+      continue;
+    }
+
+    // Split: output[i] shape = input shape with split[i] at the split axis
+    if (node.opType === 'Split') {
+      const inputShape = shapes.get(node.inputs[0]);
+      if (!inputShape || inputShape.length === 0) continue;
+      const axis = (node.attributes.axis as number) ?? 0;
+      const normalAxis = axis < 0 ? axis + inputShape.length : axis;
+      if (normalAxis < 0 || normalAxis >= inputShape.length) continue;
+      const splitAttr = node.attributes.split as number[] | undefined;
+      const numOutputs = node.outputs.filter(Boolean).length;
+      let sizes: number[];
+      if (splitAttr && splitAttr.length > 0) {
+        sizes = splitAttr;
+      } else {
+        // Equal split
+        const dim = inputShape[normalAxis];
+        if (typeof dim !== 'number' || dim <= 0) continue;
+        const sz = Math.floor(dim / numOutputs);
+        sizes = Array(numOutputs).fill(sz);
+      }
+      for (let i = 0; i < numOutputs; i++) {
+        const out = node.outputs[i];
+        if (!out) continue;
+        const outShape = [...inputShape] as (number | string)[];
+        outShape[normalAxis] = sizes[i] ?? inputShape[normalAxis];
+        const existing = shapes.get(out);
+        if (!existing || existing.length === 0) {
+          shapes.set(out, outShape);
+        } else if ((forceUpdate || !isFullyStatic(existing)) && isFullyStatic(outShape)) {
+          shapes.set(out, outShape);
+        }
+      }
+      continue;
+    }
+
+    // Squeeze: output shape = input shape with specified axes removed (or all size-1 dims)
+    if (node.opType === 'Squeeze') {
+      const inputShape = shapes.get(node.inputs[0]);
+      if (!inputShape || inputShape.length === 0) continue;
+      // Axes from attribute (opset < 13) or second constant input (opset 13+)
+      let axes: number[] | undefined = node.attributes.axes as number[] | undefined;
+      if (!axes && node.inputs.length > 1 && node.inputs[1]) {
+        const axesConst = constInt64.get(node.inputs[1]);
+        if (axesConst) axes = axesConst.map(Number);
+      }
+      let outShape: (number | string)[];
+      if (axes && axes.length > 0) {
+        const rank = inputShape.length;
+        const resolved = new Set(axes.map((a) => (a < 0 ? a + rank : a)));
+        outShape = inputShape.filter((_, i) => !resolved.has(i));
+      } else {
+        outShape = inputShape.filter((d) => d !== 1);
+      }
+      for (const out of node.outputs) {
+        if (!out) continue;
+        const existing = shapes.get(out);
+        if (!existing || existing.length === 0) {
+          shapes.set(out, outShape);
+        } else if ((forceUpdate || !isFullyStatic(existing)) && isFullyStatic(outShape)) {
+          shapes.set(out, outShape);
+        }
+      }
+      continue;
+    }
+
+    // Unsqueeze: output shape = input shape with 1s inserted at specified axes
+    if (node.opType === 'Unsqueeze') {
+      const inputShape = shapes.get(node.inputs[0]);
+      if (!inputShape || inputShape.length === 0) continue;
+      let axes: number[] | undefined = node.attributes.axes as number[] | undefined;
+      if (!axes && node.inputs.length > 1 && node.inputs[1]) {
+        const axesConst = constInt64.get(node.inputs[1]);
+        if (axesConst) axes = axesConst.map(Number);
+      }
+      if (!axes || axes.length === 0) continue;
+      const expandedRank = inputShape.length + axes.length;
+      const resolved = axes.map((a) => (a < 0 ? a + expandedRank : a)).sort((a, b) => a - b);
+      const outShape: (number | string)[] = [];
+      let srcIdx = 0;
+      for (let i = 0; i < expandedRank; i++) {
+        if (resolved.includes(i)) {
+          outShape.push(1);
+        } else {
+          outShape.push(inputShape[srcIdx++]);
+        }
+      }
+      for (const out of node.outputs) {
+        if (!out) continue;
+        const existing = shapes.get(out);
+        if (!existing || existing.length === 0) {
+          shapes.set(out, outShape);
+        }
+      }
       continue;
     }
   }
 }
+
+/**
+ * Re-run shape propagation on a graph after free-dimension overrides have been applied.
+ * This resolves Reshape outputs whose target shapes depend on dynamic dims (e.g. batch_size)
+ * that are only concretized after applyFreeDimensionOverrides.
+ */
+export function repropagateReshapeShapes(graph: GraphIR): void {
+  if (!graph.shapes || !graph.dataTypes) return;
+  propagateShapes(graph.nodes, graph.shapes, graph.dataTypes, graph.constants, /*forceUpdate=*/true);
+}
+

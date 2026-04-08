@@ -577,7 +577,7 @@ footer {
   margin-bottom: 2rem;
 }
 
-footer div {
+footer .todo, footer .examples, footer .copyright {
   display: flex;
   justify-content: center;
   align-items: center;

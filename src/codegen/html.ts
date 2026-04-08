@@ -80,7 +80,8 @@ export function generateHtml(
     table tr {display: grid; grid-template-columns: 1fr 1fr 1fr; }
     th, td { text-align: left; padding: 0.5rem; border-bottom: 1px solid #eee; }
     th { color: #666; font-weight: 600; }
-    pre { margin: 0.5rem 0; background: rgba(0, 47, 167, 0.02); padding: 1rem; overflow-x: auto; font-size: 0.8rem; max-height: 200px; }
+    pre { margin: 0.5rem 0; background: rgba(0, 47, 167, 0.02); padding: 0.5rem 1em; overflow-x: auto; font-size: 0.8rem; max-height: 200px; }
+    #results { font-size: 0.85rem; margin-top: 1rem; }
   </style>
 </head>
 <body>
@@ -164,7 +165,8 @@ async function run() {
     const inputs = {};
     for (const info of INPUT_INFO) {
       const data = new info.TypedArray(info.size);
-      for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+      const isBigInt = info.dataType === 'int64' || info.dataType === 'uint64';
+      for (let i = 0; i < data.length; i++) data[i] = isBigInt ? BigInt(Math.floor(Math.random() * 100)) : Math.random() * 2 - 1;
       const tensor = await context.createTensor({
         dataType: info.dataType, shape: info.shape.map(d => typeof d === 'number' ? d : 1),
         writable: true

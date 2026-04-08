@@ -3,7 +3,7 @@
 
 import type { GraphIR } from './ir/graph.js';
 import { applyFreeDimensionOverrides, getFreeDimensions, resolveRemainingDynamicDims } from './ir/graph.js';
-import { parseOnnx, type ExternalDataMap } from './parsers/onnx.js';
+import { parseOnnx, repropagateReshapeShapes, type ExternalDataMap } from './parsers/onnx.js';
 import { parseTflite } from './parsers/tflite.js';
 import { packWeights } from './weights/packer.js';
 import { generateJavaScriptFixed } from './codegen/javascript.js';
@@ -108,6 +108,13 @@ export async function convert(
   // WebNN requires all dimensions to be concrete unsigned long values.
   // Default any remaining symbolic dimensions to 1.
   resolveRemainingDynamicDims(graph);
+
+  // Re-run shape propagation now that ALL dimensions are concrete (whether from
+  // explicit overrides or defaulted to 1). This resolves Reshape outputs whose
+  // target shapes depend on formerly-dynamic dims (e.g. Shape → Slice → Concat chains).
+  if (modelFormat === 'onnx') {
+    repropagateReshapeShapes(graph);
+  }
 
   // Pack weights into WGWT format
   const packed = packWeights(graph.constants);

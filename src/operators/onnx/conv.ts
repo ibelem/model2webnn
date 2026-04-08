@@ -104,45 +104,41 @@ function emitConv(node: NodeIR, emitter: CodeEmitter): void {
   if (isConvInteger) {
     // ORT conv_op_builder.cc: ConvInteger decomposes to dequantizeLinear → conv2d → cast(int32)
     // WebNN conv2d only supports float32/float16 inputs, so we need to dequantize first.
-    const inputShape = emitter.tensorShape(node.inputs[0]);
-    const inputRank = inputShape ? inputShape.length : 4;
-    const targetShape = Array(inputRank).fill(1);
-    const shapeStr = `[${targetShape.join(', ')}]`;
+    // DEVIATION from ORT: use cast+sub instead of dequantizeLinear for x, because x_zero_point
+    // may come from DynamicQuantizeLinear on a tensor whose rank is absent from value_info.
+    // cast+sub is equivalent when scale=1.0: dequantize(x, 1.0, zp) ≡ cast(x) − cast(zp).
 
-    // Dequantize x: dequantizeLinear(x, scale=1.0, x_zero_point)
-    // x_zero_point is input[2] (optional), reshape to match input rank
-    let xZpRef: string;
+    // Dequantize x: cast(x, float32) - cast(x_zero_point, float32)
     const hasXZp = node.inputs.length > 2 && node.inputs[2] !== '';
+    const castX = `${output}_cast_x`;
+    emitter.line(`const ${castX} = builder.cast(${input}, 'float32');`);
+    const dequantX = `${output}_dequant_x`;
     if (hasXZp) {
       const xZpRaw = emitter.ref(node.inputs[2]);
-      xZpRef = `${output}_x_zp_reshaped`;
-      emitter.line(`const ${xZpRef} = builder.reshape(${xZpRaw}, ${shapeStr});`);
+      const castXZp = `${output}_cast_x_zp`;
+      emitter.line(`const ${castXZp} = builder.cast(${xZpRaw}, 'float32');`);
+      emitter.line(`const ${dequantX} = builder.sub(${castX}, ${castXZp});`);
     } else {
-      const inputDtype = emitter.tensorDataType(node.inputs[0]) ?? 'uint8';
-      const arrayType = inputDtype === 'int8' ? 'Int8Array' : 'Uint8Array';
-      xZpRef = `${output}_x_zp`;
-      emitter.line(`const ${xZpRef} = builder.constant({dataType: '${inputDtype}', shape: ${shapeStr}}, new ${arrayType}([0]));`);
+      emitter.line(`const ${dequantX} = ${castX};`);
     }
-    const xScaleRef = `${output}_x_scale`;
-    emitter.line(`const ${xScaleRef} = builder.constant({dataType: 'float32', shape: ${shapeStr}}, new Float32Array([1]));`);
-    const dequantX = `${output}_dequant_x`;
-    emitter.line(`const ${dequantX} = builder.dequantizeLinear(${input}, ${xScaleRef}, ${xZpRef});`);
 
     // Dequantize w: dequantizeLinear(w, scale=1.0, w_zero_point)
-    // w_zero_point is input[3] (optional)
+    // w is a constant with a known static shape, so dequantizeLinear with rank-matched scale/zp works.
+    // w_zero_point is input[3] (optional), per-channel if rank-1.
     const weightShape = emitter.tensorShape(node.inputs[1]);
-    const weightRank = weightShape ? weightShape.length : inputRank;
+    const weightRank = weightShape ? weightShape.length : 4;
     const wTargetShape = Array(weightRank).fill(1);
     let wZpRef: string;
     const hasWZp = node.inputs.length > 3 && node.inputs[3] !== '';
     if (hasWZp) {
       const wZpRaw = emitter.ref(node.inputs[3]);
-      // Per-channel w_zero_point: if 1-D, reshape to [1, C_out, 1, 1]
+      // Per-channel w_zero_point: if 1-D with C_out elements, reshape to [C_out, 1, 1, 1]
+      // so that it broadcasts correctly along dim 0 (output channels) of OIHW weight.
       const wZpShape = emitter.isConstant(node.inputs[3]) ? emitter.constantShape(node.inputs[3]) : null;
       const wZpGraphShape = emitter.tensorShape(node.inputs[3]);
       const wZpRank = wZpShape ? wZpShape.length : (wZpGraphShape ? wZpGraphShape.length : 0);
       if (wZpRank === 1 && weightShape && typeof weightShape[0] === 'number') {
-        wTargetShape[1] = weightShape[0]; // C_out is dim 0 of OIHW weight
+        wTargetShape[0] = weightShape[0]; // C_out at dim 0 of OIHW weight
       }
       wZpRef = `${output}_w_zp_reshaped`;
       emitter.line(`const ${wZpRef} = builder.reshape(${wZpRaw}, [${wTargetShape.join(', ')}]);`);

@@ -18,74 +18,40 @@ function emitGemm(node: NodeIR, emitter: CodeEmitter): void {
   if (node.opType === 'MatMulInteger') {
     // ORT gemm_op_builder.cc: MatMulInteger decomposes to dequantizeLinear → matmul → cast(int32)
     // WebNN matmul only supports float32/float16 inputs.
+    // DEVIATION from ORT: use cast+sub instead of dequantizeLinear, because A/B may be outputs of
+    // DynamicQuantizeLinear on tensors whose rank is absent from value_info (unranked intermediate
+    // tensors). The correct scale/zp shape is unknowable at codegen time, so we can't satisfy
+    // Chromium's requirement that scale rank == input rank.
+    // cast+sub is equivalent when scale=1.0: dequantize(x, 1.0, zp) ≡ cast(x) − cast(zp).
     const output = emitter.declare(node.outputs[0]);
 
-    // Dequantize A: dequantizeLinear(a, scale=1.0, a_zero_point)
-    const aShape = emitter.tensorShape(node.inputs[0]);
-    const aRank = aShape ? aShape.length : 2;
-    const aTargetShape = Array(aRank).fill(1);
-
-    let aZpRef: string;
+    // Dequantize A: cast(a, float32) - cast(a_zero_point, float32)
     const hasAZp = node.inputs.length > 2 && node.inputs[2] !== '';
+    const castA = `${output}_cast_a`;
+    emitter.line(`const ${castA} = builder.cast(${a}, 'float32');`);
+    const dequantA = `${output}_dequant_a`;
     if (hasAZp) {
       const aZpRaw = emitter.ref(node.inputs[2]);
-      const aZpGraphShape = emitter.tensorShape(node.inputs[2]);
-      const aZpRank = aZpGraphShape ? aZpGraphShape.length : 0;
-      if (aZpRank === 1 && aShape && typeof aShape[0] === 'number' && aShape[0] !== 1) {
-        // Per-row zero point for A: shape [M] → [M, 1, ...]
-        aTargetShape[0] = aShape[0];
-      }
-      if (aZpRank !== aRank) {
-        aZpRef = `${output}_a_zp_reshaped`;
-        emitter.line(`const ${aZpRef} = builder.reshape(${aZpRaw}, [${aTargetShape.join(', ')}]);`);
-      } else {
-        aZpRef = aZpRaw;
-      }
+      const castAZp = `${output}_cast_a_zp`;
+      emitter.line(`const ${castAZp} = builder.cast(${aZpRaw}, 'float32');`);
+      emitter.line(`const ${dequantA} = builder.sub(${castA}, ${castAZp});`);
     } else {
-      const aDtype = emitter.tensorDataType(node.inputs[0]) ?? 'uint8';
-      const arrayType = aDtype === 'int8' ? 'Int8Array' : 'Uint8Array';
-      aZpRef = `${output}_a_zp`;
-      emitter.line(`const ${aZpRef} = builder.constant({dataType: '${aDtype}', shape: [${aTargetShape.join(', ')}]}, new ${arrayType}([0]));`);
+      emitter.line(`const ${dequantA} = ${castA};`);
     }
-    const aScaleRef = `${output}_a_scale`;
-    emitter.line(`const ${aScaleRef} = builder.constant({dataType: 'float32', shape: [${aTargetShape.join(', ')}]}, new Float32Array([1]));`);
-    const dequantA = `${output}_dequant_a`;
-    emitter.line(`const ${dequantA} = builder.dequantizeLinear(${a}, ${aScaleRef}, ${aZpRef});`);
 
-    // Dequantize B: dequantizeLinear(b, scale=1.0, b_zero_point)
-    const bShape = emitter.tensorShape(node.inputs[1]);
-    const bRank = bShape ? bShape.length : 2;
-    const bTargetShape = Array(bRank).fill(1);
-
-    let bZpRef: string;
+    // Dequantize B: cast(b, float32) - cast(b_zero_point, float32)
     const hasBZp = node.inputs.length > 3 && node.inputs[3] !== '';
+    const castB = `${output}_cast_b`;
+    emitter.line(`const ${castB} = builder.cast(${b}, 'float32');`);
+    const dequantB = `${output}_dequant_b`;
     if (hasBZp) {
       const bZpRaw = emitter.ref(node.inputs[3]);
-      const bZpGraphShape = emitter.tensorShape(node.inputs[3]);
-      const bZpRank = bZpGraphShape ? bZpGraphShape.length : 0;
-      if (bZpRank === 1 && bShape && bShape.length > 0) {
-        // Per-column zero point for B: shape [K] → [..., K] (last dim)
-        const lastDimVal = bShape[bShape.length - 1];
-        if (typeof lastDimVal === 'number') {
-          bTargetShape[bTargetShape.length - 1] = lastDimVal;
-        }
-      }
-      if (bZpRank !== bRank) {
-        bZpRef = `${output}_b_zp_reshaped`;
-        emitter.line(`const ${bZpRef} = builder.reshape(${bZpRaw}, [${bTargetShape.join(', ')}]);`);
-      } else {
-        bZpRef = bZpRaw;
-      }
+      const castBZp = `${output}_cast_b_zp`;
+      emitter.line(`const ${castBZp} = builder.cast(${bZpRaw}, 'float32');`);
+      emitter.line(`const ${dequantB} = builder.sub(${castB}, ${castBZp});`);
     } else {
-      const aDtype = emitter.tensorDataType(node.inputs[0]) ?? 'uint8';
-      const arrayType = aDtype === 'int8' ? 'Int8Array' : 'Uint8Array';
-      bZpRef = `${output}_b_zp`;
-      emitter.line(`const ${bZpRef} = builder.constant({dataType: '${aDtype}', shape: [${bTargetShape.join(', ')}]}, new ${arrayType}([0]));`);
+      emitter.line(`const ${dequantB} = ${castB};`);
     }
-    const bScaleRef = `${output}_b_scale`;
-    emitter.line(`const ${bScaleRef} = builder.constant({dataType: 'float32', shape: [${bTargetShape.join(', ')}]}, new Float32Array([1]));`);
-    const dequantB = `${output}_dequant_b`;
-    emitter.line(`const ${dequantB} = builder.dequantizeLinear(${b}, ${bScaleRef}, ${bZpRef});`);
 
     // Matmul with float32 inputs → cast to int32
     const matmulOut = `${output}_matmul`;

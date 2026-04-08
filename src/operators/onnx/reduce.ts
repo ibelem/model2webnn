@@ -27,12 +27,17 @@ function emitReduce(node: NodeIR, emitter: CodeEmitter): void {
 
   // Axes from attribute (opset <18) or second input constant (opset 18+ / ReduceSum opset 13+)
   let axes = node.attributes.axes as number[] | undefined;
+  const inputShape = emitter.tensorShape(node.inputs[0]);
+  const rank = inputShape ? inputShape.length : 0;
+  if (axes && axes.some((a) => a < 0)) {
+    // Resolve negative attribute axes using input rank
+    if (rank > 0) {
+      axes = axes.map((a) => (a < 0 ? a + rank : a));
+    }
+  }
   if (!axes && node.inputs.length > 1 && node.inputs[1] !== '' && emitter.isConstant(node.inputs[1])) {
     const axesValues = emitter.constantIntValues(node.inputs[1]);
     if (axesValues && axesValues.length > 0) {
-      // Resolve negative axes
-      const inputShape = emitter.tensorShape(node.inputs[0]);
-      const rank = inputShape ? inputShape.length : 0;
       axes = axesValues.map((a) => (a < 0 && rank > 0 ? a + rank : a));
     }
   }
@@ -46,8 +51,8 @@ function emitReduce(node: NodeIR, emitter: CodeEmitter): void {
     // noop_with_empty_axes=1: pass empty axes array (no reduction, but other ops still run)
     opts.push(`axes: []`);
   }
-  if (!keepdims) {
-    opts.push(`keepDimensions: false`);
+  if (keepdims) {
+    opts.push(`keepDimensions: true`);
   }
 
   const optsStr = opts.length > 0 ? `, { ${opts.join(', ')} }` : '';

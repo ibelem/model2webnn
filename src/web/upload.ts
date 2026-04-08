@@ -91,6 +91,18 @@ function escapeHtml(s: string): string {
   return d.innerHTML;
 }
 
+/** Remove the ?url= and all &dim= query parameters from the address bar without reloading.
+ * Called when a local file is loaded — dim overrides only persist for URL-fetched models. */
+function clearUrlParam(): void {
+  const url = new URL(location.href);
+  let changed = false;
+  if (url.searchParams.has('url')) { url.searchParams.delete('url'); changed = true; }
+  if (url.searchParams.has('dim')) { url.searchParams.delete('dim'); changed = true; }
+  if (changed) {
+    history.replaceState(null, '', url.pathname + (url.search !== '?' ? url.search : ''));
+  }
+}
+
 /**
  * Fetch a URL with streaming progress. Returns the final Uint8Array.
  * Pre-allocates when Content-Length is available to avoid double memory usage.
@@ -365,6 +377,7 @@ async function handleSingleModelFile(
   onModelLoaded: OnModelLoaded,
   onExternalDataNeeded?: OnExternalDataNeeded,
 ): Promise<void> {
+  clearUrlParam();
   const statusEl = document.getElementById('uploadStatus')!;
   statusEl.style.display = '';
   statusEl.className = 'status-banner info';
@@ -397,6 +410,7 @@ async function handleMultipleFiles(
   onModelLoaded: OnModelLoaded,
   onExternalDataNeeded?: OnExternalDataNeeded,
 ): Promise<void> {
+  clearUrlParam();
   const statusEl = document.getElementById('uploadStatus')!;
   statusEl.style.display = '';
   statusEl.className = 'status-banner info';

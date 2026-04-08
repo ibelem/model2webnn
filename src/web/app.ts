@@ -17,6 +17,9 @@ let pendingConversion: {
   freeDims: string[];
 } | null = null;
 
+/** True when the current model was fetched from a URL (enables dim↔URL sync). */
+let modelFromUrl = false;
+
 async function handleModelLoaded(
   buffer: Uint8Array,
   fileName: string,
@@ -31,6 +34,8 @@ async function handleModelLoaded(
 
     // Reset state from any previous model
     pendingConversion = null;
+    // clearUrlParam() runs before onModelLoaded for local files, so 'url' is gone by now.
+    modelFromUrl = new URLSearchParams(window.location.search).has('url');
     document.getElementById('freeDimSection')!.style.display = 'none';
     document.getElementById('externalDataSection')!.style.display = 'none';
     document.getElementById('coverageWarning')!.style.display = 'none';
@@ -52,14 +57,19 @@ async function handleModelLoaded(
       freeDims = getFreeDimensions(graph);
     }
 
+    let urlDimOverrides: Record<string, number> | undefined;
     if (freeDims.length > 0) {
-      // Has dynamic dimensions — show override UI, but convert immediately with symbolic dims
+      // Has dynamic dimensions — show override UI
       pendingConversion = { buffer, fileName, externalData, freeDims };
       showFreeDimOverrideUI(freeDims);
+      // Pre-populate inputs from URL dim params (e.g. &dim=batch_size:1&dim=seq_len:128)
+      if (modelFromUrl) {
+        urlDimOverrides = populateDimsFromUrl(freeDims);
+      }
     }
 
-    // Convert immediately (symbolic dims kept as-is if no overrides)
-    await runConversion(buffer, fileName, externalData);
+    // Convert immediately (with URL dim overrides if present, otherwise symbolic dims)
+    await runConversion(buffer, fileName, externalData, urlDimOverrides);
   } catch (err: unknown) {
     statusEl.className = 'status-banner error';
     statusEl.textContent = `Error: ${(err as Error).message}`;
@@ -105,6 +115,7 @@ function showFreeDimOverrideUI(freeDims: string[]): void {
   // Auto-regenerate on input change (debounced)
   list.addEventListener('input', () => {
     updateFreeDimSectionStyle();
+    syncDimsToUrl(); // update URL immediately for shareability
     if (freeDimDebounceTimer) clearTimeout(freeDimDebounceTimer);
     freeDimDebounceTimer = setTimeout(() => handleFreeDimConvert(), 600);
   });
@@ -221,6 +232,48 @@ async function runConversion(
 
 function handleExternalDataNeeded(refs: string[]): void {
   showExternalDataPrompt(refs);
+}
+
+/**
+ * Read &dim=NAME:VALUE params from the current URL and populate the free dim inputs.
+ * Splits on the FIRST colon only, so names like "serving_default_input:0" are safe.
+ * Returns the parsed overrides (only dims that are valid positive integers).
+ */
+function populateDimsFromUrl(freeDims: string[]): Record<string, number> | undefined {
+  const params = new URLSearchParams(window.location.search);
+  const overrides: Record<string, number> = {};
+  for (const raw of params.getAll('dim')) {
+    const sep = raw.indexOf(':');
+    if (sep < 1) continue;
+    const name = raw.slice(0, sep);
+    const val = parseInt(raw.slice(sep + 1), 10);
+    if (!isNaN(val) && val >= 1 && freeDims.includes(name)) {
+      const input = document.getElementById(`freeDim_${name}`) as HTMLInputElement | null;
+      if (input) input.value = String(val);
+      overrides[name] = val;
+    }
+  }
+  updateFreeDimSectionStyle();
+  return Object.keys(overrides).length > 0 ? overrides : undefined;
+}
+
+/**
+ * Sync the current free dim input values back to the URL as &dim=NAME:VALUE params.
+ * Only runs when the model was loaded from a URL (no-op for local files).
+ */
+function syncDimsToUrl(): void {
+  if (!modelFromUrl || !pendingConversion) return;
+  const url = new URL(location.href);
+  url.searchParams.delete('dim');
+  for (const dim of pendingConversion.freeDims) {
+    const input = document.getElementById(`freeDim_${dim}`) as HTMLInputElement | null;
+    const v = input?.value.trim();
+    const n = v ? parseInt(v, 10) : NaN;
+    if (!isNaN(n) && n >= 1) {
+      url.searchParams.append('dim', `${dim}:${n}`);
+    }
+  }
+  history.replaceState(null, '', url.toString());
 }
 
 // Initialize the app
