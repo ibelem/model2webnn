@@ -550,7 +550,7 @@ main {
 
 /* --- Editor container --- */
 .editor-container {
-  height: clamp(420px, 76vh, 700px);
+  height: clamp(420px, 72vh, 700px);
   overflow: hidden;
   box-shadow: var(--shadow-inset);
 }
@@ -597,6 +597,11 @@ footer a:hover {
   color: var(--accent);
   transform: translateY(-1px);
 }
+
+.examples {
+  margin-bottom: 0.25rem;
+}
+
 .examples span {
   margin-right: 0.5rem;
 }
@@ -720,7 +725,7 @@ footer a:hover {
     max-width: 640px;
     gap: 0.5rem;
     align-content: center;
-    min-height: calc(100dvh - 160px);
+    min-height: calc(100dvh - 180px);
     transition:
       grid-template-columns .65s var(--ease-out-expo),
       max-width .65s var(--ease-out-expo),
@@ -798,7 +803,7 @@ footer a:hover {
 
 /* --- Panels (Weight Reader, Op Mapping, Preview) --- */
 .panel {
-  height: clamp(420px, 76vh, 700px);
+  height: clamp(420px, 72vh, 700px);
   overflow: hidden;
   box-shadow: var(--shadow-inset);
   animation: fadeSlideIn .3s var(--ease-out) both;

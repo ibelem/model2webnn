@@ -371,7 +371,6 @@ const SHAPE_PRESERVING_OPS = new Set([
   'Abs', 'Ceil', 'Cos', 'Erf', 'Exp', 'Floor', 'Identity', 'Log',
   'Neg', 'Reciprocal', 'Round', 'Sign', 'Sin', 'Sqrt', 'Tan', 'Not',
   'Cast', 'Dropout', 'Clip', 'Softmax', 'LogSoftmax',
-  'Flatten',
 ]);
 
 // Element-wise ops where output shape = broadcast(input shapes)
@@ -773,6 +772,30 @@ function propagateShapes(
           shapes.set(out, outShape);
         } else if ((forceUpdate || !isFullyStatic(existing)) && isFullyStatic(outShape)) {
           shapes.set(out, outShape);
+        }
+      }
+      continue;
+    }
+
+    // Flatten: output shape = [product(dims[:axis]), product(dims[axis:])]
+    if (node.opType === 'Flatten') {
+      const inputShape = shapes.get(node.inputs[0]);
+      if (!inputShape || inputShape.length === 0) continue;
+      const axis = (node.attributes.axis as number) ?? 1;
+      const normalAxis = axis < 0 ? axis + inputShape.length : axis;
+      // Can only compute if all dims are numeric
+      if (inputShape.every((d): d is number => typeof d === 'number')) {
+        const dim0 = (inputShape as number[]).slice(0, normalAxis).reduce((a, b) => a * b, 1);
+        const dim1 = (inputShape as number[]).slice(normalAxis).reduce((a, b) => a * b, 1);
+        const outShape = [dim0, dim1];
+        for (const out of node.outputs) {
+          if (!out) continue;
+          const existing = shapes.get(out);
+          if (!existing || existing.length === 0) {
+            shapes.set(out, outShape);
+          } else if ((forceUpdate || !isFullyStatic(existing)) && isFullyStatic(outShape)) {
+            shapes.set(out, outShape);
+          }
         }
       }
       continue;

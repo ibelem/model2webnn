@@ -16,7 +16,8 @@ function emitGatherBlockQuantized(node: NodeIR, emitter: CodeEmitter): void {
 
   emitter.comment(`GatherBlockQuantized — bits=${bits}, axis=${gatherAxis}`);
 
-  // Zero points
+  // Zero points — must have the same shape as scales per WebNN dequantizeLinear spec.
+  // See ORT gatherBlockQuantized_op_builder.cc: CreateOrGetConstant with scales_shape.
   const hasZeroPoints = node.inputs.length > 3 && node.inputs[3] !== '';
   let zpVar: string;
   if (hasZeroPoints) {
@@ -24,12 +25,20 @@ function emitGatherBlockQuantized(node: NodeIR, emitter: CodeEmitter): void {
   } else {
     const defaultZp = bits === 4 ? 0 : 128;
     zpVar = `${output}_default_zp`;
-    emitter.line(`const ${zpVar} = builder.constant({dataType: 'uint8', shape: []}, new Uint8Array([${defaultZp}]));`);
+    const scalesShape = emitter.tensorShape(node.inputs[2]);
+    if (scalesShape && scalesShape.length > 0 && scalesShape.every((d): d is number => typeof d === 'number')) {
+      const numElements = scalesShape.reduce((a, b) => a * b, 1);
+      emitter.line(`const ${zpVar} = builder.constant({dataType: 'uint8', shape: [${scalesShape.join(', ')}]}, new Uint8Array(${numElements}).fill(${defaultZp}));`);
+    } else {
+      // Fallback: use scalar and hope blockwise broadcasting is supported
+      emitter.line(`const ${zpVar} = builder.constant({dataType: 'uint8', shape: []}, new Uint8Array([${defaultZp}]));`);
+    }
   }
 
   // Step 1: Dequantize
+  // WebNN signature: dequantizeLinear(input, scale, zeroPoint)
   const dequantized = `${output}_dq`;
-  emitter.line(`const ${dequantized} = builder.dequantizeLinear(${input}, { scale: ${scales}, zeroPoint: ${zpVar} });`);
+  emitter.line(`const ${dequantized} = builder.dequantizeLinear(${input}, ${scales}, ${zpVar});`);
 
   // Step 2: Gather
   emitter.line(`const ${output} = builder.gather(${dequantized}, ${indices}, { axis: ${gatherAxis} });`);

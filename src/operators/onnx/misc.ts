@@ -274,8 +274,15 @@ function emitTrilu(node: NodeIR, emitter: CodeEmitter): void {
   const webnnOp = upper ? 'triangular' : 'triangular';
   const opts: string[] = [];
   if (!upper) opts.push(`upper: false`);
+  // ONNX Trilu input[1] is a scalar tensor for k; WebNN expects a plain integer
   if (node.inputs.length > 1 && node.inputs[1] !== '') {
-    opts.push(`diagonal: ${emitter.ref(node.inputs[1])}`);
+    const kVals = emitter.constantIntValues(node.inputs[1]);
+    if (kVals && kVals.length === 1) {
+      opts.push(`diagonal: ${kVals[0]}`);
+    } else {
+      // Fallback: should not happen (k is always a constant scalar in practice)
+      opts.push(`diagonal: ${emitter.ref(node.inputs[1])}`);
+    }
   }
   const optsStr = opts.length > 0 ? `, { ${opts.join(', ')} }` : '';
   emitter.line(`const ${output} = builder.${webnnOp}(${input}${optsStr});`);

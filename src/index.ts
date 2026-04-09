@@ -3,6 +3,7 @@
 
 import type { GraphIR } from './ir/graph.js';
 import { applyFreeDimensionOverrides, getFreeDimensions, resolveRemainingDynamicDims } from './ir/graph.js';
+import { foldConstants } from './ir/constant-folding.js';
 import { parseOnnx, repropagateReshapeShapes, type ExternalDataMap } from './parsers/onnx.js';
 import { parseTflite } from './parsers/tflite.js';
 import { packWeights } from './weights/packer.js';
@@ -115,6 +116,11 @@ export async function convert(
   if (modelFormat === 'onnx') {
     repropagateReshapeShapes(graph);
   }
+
+  // Constant folding: evaluate nodes whose inputs are all constants at build time.
+  // This resolves shape-computation chains (Shape → Gather → Concat → Reshape)
+  // and ops without WebNN equivalents (Range, ConstantOfShape) in transformer models.
+  foldConstants(graph);
 
   // Pack weights into WGWT format
   const packed = packWeights(graph.constants);
