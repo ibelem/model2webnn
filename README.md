@@ -18,7 +18,7 @@ model2webnn parses `.onnx` and `.tflite` model files and generates self-containe
 ### Web UI
 
 1. Open [ibelem.github.io/model2webnn](https://ibelem.github.io/model2webnn)
-2. Upload a model or paste a URL (HuggingFace links supported)
+2. Upload a model or paste a URL (HuggingFace and hf-mirror.com links supported)
 3. Code generates instantly in the Monaco editor
 4. Set free dimension overrides to regenerate with fixed shapes
 5. Download individual files or the full `.zip` bundle from the header
@@ -60,8 +60,9 @@ import { convert } from 'model2webnn';
 
 const buffer = new Uint8Array(await file.arrayBuffer());
 const result = await convert(buffer, {
-  format: 'javascript',
-  freeDimensionOverrides: { batch_size: 1 },
+  format: 'javascript',                         // 'javascript' | 'typescript' | 'html'
+  freeDimensionOverrides: { batch_size: 1 },    // resolve symbolic dimensions
+  title: 'WebNN · my-model',                   // optional HTML page title override
 });
 
 result.code;               // .js source — buildGraph(context, weights)
@@ -190,16 +191,18 @@ See [ONNX Runtime freeDimensionOverrides](https://webnn.io/en/learn/tutorials/on
 .onnx / .tflite
       │
       ▼
-   Parser          GraphIR        Op Registry        Codegen
-  onnx.ts    ──▶  (shared)  ──▶  (per op/format) ──▶  javascript.ts
-  tflite.ts                                            typescript.ts
-                                                       html.ts
-                                                          │
-                              ┌───────────────┬──────────┴────────────┐
+   Parser          GraphIR      Free-dim        Constant         Op Registry        Codegen
+  onnx.ts    ──▶  (shared) ──▶  overrides  ──▶  folding    ──▶  (per op/format) ──▶  javascript.ts
+  tflite.ts                                  (25 evaluators)                          typescript.ts
+                                                                                       html.ts
+                                                                                          │
+                              ┌───────────────┬──────────────────────────────────────────┘
                               ▼               ▼                       ▼
                           model.js     model.weights          model.html
                                        model.manifest.json
 ```
+
+The **constant folding** pass evaluates nodes whose inputs are all statically known at model-load time (Shape, Gather, Concat, Reshape, ConstantOfShape, Range, Cast, Unsqueeze, elementwise ops, …) and replaces them with pre-computed constants. This resolves shape-computation chains common in transformer models (Shape→Gather→Concat→Reshape for dynamic-batch reshapes, ConstantOfShape for attention masks, etc.) so that downstream ops like `builder.reshape()` and `builder.slice()` always receive plain JavaScript arrays instead of MLOperand references.
 
 ### Directory structure
 
@@ -207,7 +210,9 @@ See [ONNX Runtime freeDimensionOverrides](https://webnn.io/en/learn/tutorials/on
 src/
 ├── index.ts          Public API — convert(), validateOperatorCoverage()
 ├── cli.ts            CLI entry point
-├── ir/graph.ts       GraphIR, NodeIR, TensorInfo, ConstantInfo
+├── ir/
+│   ├── graph.ts      GraphIR, NodeIR, TensorInfo, ConstantInfo
+│   └── constant-folding.ts  25-evaluator constant folding pipeline
 ├── parsers/
 │   ├── onnx.ts       ONNX protobuf → GraphIR (external data supported)
 │   └── tflite.ts     TFLite flatbuffers → GraphIR
