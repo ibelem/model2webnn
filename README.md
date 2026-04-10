@@ -152,7 +152,7 @@ ABS, ADD, ADD_N, ARG_MAX, ARG_MIN, AVERAGE_POOL_2D, BATCH_MATMUL, BROADCAST_TO, 
 
 ### Unsupported ops
 
-When a model contains ops with no WebNN equivalent (e.g. `TopK`, `Range`, `Mod`), the codegen:
+When a model contains ops with no WebNN equivalent (e.g. `TopK`, `Mod`), the codegen:
 
 1. Marks those op outputs as **dead**
 2. Propagates dead state through all downstream ops automatically
@@ -202,7 +202,9 @@ See [ONNX Runtime freeDimensionOverrides](https://webnn.io/en/learn/tutorials/on
                                        model.manifest.json
 ```
 
-The **constant folding** pass evaluates nodes whose inputs are all statically known at model-load time (Shape, Gather, Concat, Reshape, ConstantOfShape, Range, Cast, Unsqueeze, elementwise ops, …) and replaces them with pre-computed constants. This resolves shape-computation chains common in transformer models (Shape→Gather→Concat→Reshape for dynamic-batch reshapes, ConstantOfShape for attention masks, etc.) so that downstream ops like `builder.reshape()` and `builder.slice()` always receive plain JavaScript arrays instead of MLOperand references.
+The **constant folding** pass evaluates nodes whose inputs are all statically known at model-load time (Shape, Gather, Concat, Reshape, ConstantOfShape, Range, Cast, Unsqueeze, elementwise ops, …) and replaces them with pre-computed constants. This resolves shape-computation chains common in transformer models (Shape→Gather→Concat→Reshape for dynamic-batch reshapes, ConstantOfShape for attention masks, Range for position indices, etc.) so that downstream ops like `builder.reshape()` and `builder.slice()` always receive plain JavaScript arrays instead of MLOperand references.
+
+> **Note:** `Range` and `ConstantOfShape` have no WebNN `MLGraphBuilder` equivalent. They are handled entirely by constant folding — evaluated at build time and removed from the graph, so they never appear as unsupported ops in a successfully-converted model.
 
 ### Directory structure
 
