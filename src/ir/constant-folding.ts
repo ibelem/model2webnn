@@ -408,6 +408,8 @@ function packValues(values: number[], dataType: MLOperandDataType): Uint8Array {
     case 'uint32': return new Uint8Array(new Uint32Array(values).buffer);
     case 'int8': return new Uint8Array(new Int8Array(values).buffer);
     case 'uint8': return packUint8(values);
+    case 'uint4':
+    case 'int4': return new Uint8Array(0); // 4-bit types are not folded
   }
 }
 
@@ -424,7 +426,10 @@ const ShapeEvaluator: ConstantEvaluator = {
   opType: 'Shape',
   canEvaluate(node, ctx) {
     const input = node.inputs[0];
-    // Only fold Shape on constants or graph inputs, not intermediate runtime tensors
+    // Only fold Shape on constants or graph inputs, not intermediate runtime tensors.
+    // Folding Shape on intermediates causes cascading mis-folds in shape-computation
+    // chains (e.g. Shape→Gather→Concat→Where→Expand) that produce incorrect values
+    // when the model's dynamic-dim logic doesn't match static resolution.
     if (!ctx.isConstant(input) && !ctx.isGraphInput(input)) return false;
     const shape = ctx.getShape(input);
     return !!shape && shape.every(d => typeof d === 'number');

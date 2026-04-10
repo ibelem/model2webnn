@@ -21,6 +21,13 @@ export interface ConvertOptions {
   weightsFileName?: string;
   manifestFileName?: string;
   modelName?: string;
+  /**
+   * Optional title override for the generated HTML page.
+   * Defaults to `WebNN · <modelName>`.
+   * Use this to embed the HuggingFace model ID in the title when the model
+   * was fetched from huggingface.co or hf-mirror.com.
+   */
+  title?: string;
   /** External data files for ONNX models with weights in separate files */
   externalData?: ExternalDataMap;
   /**
@@ -77,6 +84,7 @@ export async function convert(
     weightsFileName = 'model.weights',
     manifestFileName = 'model.manifest.json',
     modelName,
+    title,
     externalData,
     freeDimensionOverrides,
   } = options;
@@ -122,6 +130,11 @@ export async function convert(
   // and ops without WebNN equivalents (Range, ConstantOfShape) in transformer models.
   foldConstants(graph);
 
+  // Reinterpret MatMulNBits packed uint8 constants as uint4 with doubled shape.
+  // ORT does this in matMulNBits_op_builder.cc — the raw bytes stay the same, but
+  // each byte is two uint4 values, so the logical element count doubles.
+  fixMatMulNBitsConstants(graph);
+
   // Pack weights into WGWT format
   const packed = packWeights(graph.constants);
 
@@ -136,12 +149,12 @@ export async function convert(
       break;
     case 'html':
       code = generateJavaScriptFixed(graph, codegenOpts);
-      html = generateHtml(graph, { weightsFileName, manifestFileName });
+      html = generateHtml(graph, { weightsFileName, manifestFileName, title });
       break;
     case 'javascript':
     default:
       code = generateJavaScriptFixed(graph, codegenOpts);
-      html = generateHtml(graph, { weightsFileName, manifestFileName });
+      html = generateHtml(graph, { weightsFileName, manifestFileName, title });
       break;
   }
 
@@ -239,3 +252,52 @@ export { generateHtml } from './codegen/html.js';
 // Note: getSupportedOnnxOps and getSupportedTfliteOps are imported at the top and used internally
 // Re-export them for downstream consumers:
 export { getSupportedOnnxOps, getSupportedTfliteOps } from './operators/registry.js';
+
+/**
+ * Reinterpret MatMulNBits packed uint8 constants (B and zero_points) as uint4.
+ * Ported from ORT matMulNBits_op_builder.cc: the raw bytes stay the same but
+ * WebNN's uint4 type interprets each byte as two 4-bit elements.
+ *
+ * B:  uint8 [N, n_blocks, blob_size]  → uint4 [N, n_blocks, blob_size * 2]
+ * zp: uint8 [N, ceil(n_blocks/2)]     → uint4 [N, n_blocks, 1]
+ */
+function fixMatMulNBitsConstants(graph: GraphIR): void {
+  const constantMap = new Map(graph.constants.map((c) => [c.name, c]));
+  const fixed = new Set<string>();
+
+  for (const node of graph.nodes) {
+    if (node.opType !== 'MatMulNBits') continue;
+
+    const bName = node.inputs[1];
+    const bConst = constantMap.get(bName);
+    if (bConst && bConst.dataType === 'uint8' && !fixed.has(bName)) {
+      // Double the last dimension: each uint8 byte holds 2 uint4 values
+      const lastDim = bConst.shape[bConst.shape.length - 1];
+      if (typeof lastDim === 'number') {
+        bConst.shape[bConst.shape.length - 1] = lastDim * 2;
+      }
+      bConst.dataType = 'uint4';
+      fixed.add(bName);
+      // Update shape/dataType maps if present
+      if (graph.shapes) graph.shapes.set(bName, [...bConst.shape]);
+      if (graph.dataTypes) graph.dataTypes.set(bName, 'uint4');
+    }
+
+    // Zero points (input index 3) — also packed uint8 → uint4
+    if (node.inputs.length > 3 && node.inputs[3] !== '') {
+      const zpName = node.inputs[3];
+      const zpConst = constantMap.get(zpName);
+      if (zpConst && zpConst.dataType === 'uint8' && !fixed.has(zpName)) {
+        const N = (node.attributes.N as number) ?? 0;
+        const K = (node.attributes.K as number) ?? 0;
+        const blockSize = (node.attributes.block_size as number) ?? 32;
+        const nBlocks = Math.ceil(K / blockSize);
+        zpConst.dataType = 'uint4';
+        zpConst.shape = [N, nBlocks, 1];
+        fixed.add(zpName);
+        if (graph.shapes) graph.shapes.set(zpName, [N, nBlocks, 1]);
+        if (graph.dataTypes) graph.dataTypes.set(zpName, 'uint4');
+      }
+    }
+  }
+}

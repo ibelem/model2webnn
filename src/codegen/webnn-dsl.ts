@@ -20,6 +20,8 @@ function dslDtype(dt: MLOperandDataType): string {
     case 'uint32': return 'u32';
     case 'int8': return 'i8';
     case 'uint8': return 'u8';
+    case 'uint4': return 'u4';
+    case 'int4': return 'i4';
   }
 }
 

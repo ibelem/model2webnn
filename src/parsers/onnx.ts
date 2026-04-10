@@ -26,6 +26,7 @@ function toLong(v: number | Long): number {
 const ATTR_FLOAT = 1;
 const ATTR_INT = 2;
 const ATTR_STRING = 3;
+const ATTR_TENSOR = 4;
 const ATTR_FLOATS = 6;
 const ATTR_INTS = 7;
 
@@ -37,6 +38,20 @@ function parseAttribute(attr: any): unknown {
     case ATTR_STRING: {
       if (attr.s instanceof Uint8Array) return new TextDecoder().decode(attr.s);
       return attr.s ?? '';
+    }
+    case ATTR_TENSOR: {
+      // Pass through the TensorProto so downstream consumers (e.g. ConstantOfShape
+      // evaluator) can read dataType, floatData, int32Data, int64Data, rawData.
+      const t = attr.t;
+      if (!t) return undefined;
+      return {
+        dataType: t.dataType ?? 1,
+        dims: (t.dims ?? []).map((d: any) => toLong(d as number | Long)),
+        floatData: t.floatData ?? [],
+        int32Data: t.int32Data ?? [],
+        int64Data: (t.int64Data ?? []).map((v: any) => typeof v === 'number' ? v : Number(toLong(v as number | Long))),
+        rawData: t.rawData instanceof Uint8Array ? t.rawData : undefined,
+      };
     }
     case ATTR_FLOATS: return attr.floats ?? [];
     case ATTR_INTS: return (attr.ints ?? []).map((v: any) => toLong(v as number | Long));

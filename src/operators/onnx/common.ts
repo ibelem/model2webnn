@@ -306,11 +306,36 @@ function emitSlice(node: NodeIR, emitter: CodeEmitter): void {
     const stridesOpt = hasStrides ? `, { strides: [${resolvedStrides.join(', ')}] }` : '';
     emitter.line(`const ${output} = builder.slice(${input}, [${resolvedStarts.join(', ')}], [${resolvedSizes.join(', ')}]${stridesOpt});`);
   } else {
-    // Fallback: emit with refs (may fail at runtime if not arrays)
-    const starts = emitter.ref(node.inputs[1]);
-    const ends = emitter.ref(node.inputs[2]);
-    emitter.comment(`WARNING: Slice inputs not fully resolved as constants`);
-    emitter.line(`const ${output} = builder.slice(${input}, ${starts}, ${ends});`);
+    // Fallback: try to use the output shape to derive sizes
+    const outputShape = emitter.tensorShape(node.outputs[0]);
+    if (startsRaw && outputShape && outputShape.every((d) => typeof d === 'number')) {
+      // We have starts and the output shape is fully static — use output shape as sizes
+      const sizes = outputShape as number[];
+      const resolvedStarts = new Array(rank).fill(0);
+      const resolvedSizes = inputShape && inputShape.every((d) => typeof d === 'number')
+        ? (inputShape as number[]).slice() : sizes.slice();
+      const resolvedStrides = new Array(rank).fill(1);
+      const axes = axesRaw ? axesRaw.map((a) => (a < 0 ? a + rank : a)) : Array.from({ length: startsRaw.length }, (_, i) => i);
+      const steps = stepsRaw ?? new Array(startsRaw.length).fill(1);
+      for (let i = 0; i < startsRaw.length; i++) {
+        const ax = axes[i];
+        const dimSize = resolvedSizes[ax] || sizes[ax] || 0;
+        let s = startsRaw[i];
+        if (s < 0) s = Math.max(0, s + dimSize);
+        resolvedStarts[ax] = s;
+        resolvedSizes[ax] = sizes[ax];
+        resolvedStrides[ax] = steps[i];
+      }
+      const hasStrides = resolvedStrides.some((s) => s !== 1);
+      const stridesOpt = hasStrides ? `, { strides: [${resolvedStrides.join(', ')}] }` : '';
+      emitter.comment(`Slice: used output shape as sizes (ends not resolved as constants)`);
+      emitter.line(`const ${output} = builder.slice(${input}, [${resolvedStarts.join(', ')}], [${resolvedSizes.join(', ')}]${stridesOpt});`);
+    } else {
+      // Cannot resolve — WebNN builder.slice requires plain JS arrays, not MLOperand refs
+      emitter.comment(`ERROR: Slice inputs (starts/ends) could not be resolved as constant arrays.`);
+      emitter.comment(`WebNN builder.slice() requires plain JavaScript arrays for starts and sizes.`);
+      emitter.line(`const ${output} = (() => { throw new Error('Slice: starts/ends not resolvable as constants — ensure all free dimensions are specified'); })();`);
+    }
   }
 }
 

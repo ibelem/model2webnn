@@ -43,13 +43,16 @@ export type MLOperandDataType =
   | 'int32'
   | 'uint32'
   | 'int8'
-  | 'uint8';
+  | 'uint8'
+  | 'uint4'
+  | 'int4';
 
 // Chromium-only — not in published spec, but required for current Chrome builds
 export type MLDeviceType = 'cpu' | 'gpu' | 'npu';
 export type MLPowerPreference = 'default' | 'high-performance' | 'low-power';
 
 // MLOperandDataType → TypedArray constructor name
+// For uint4/int4, elements are nibble-packed into Uint8Array (2 elements per byte).
 export function getTypedArrayName(dataType: MLOperandDataType): string {
   switch (dataType) {
     case 'float32': return 'Float32Array';
@@ -60,10 +63,13 @@ export function getTypedArrayName(dataType: MLOperandDataType): string {
     case 'uint32': return 'Uint32Array';
     case 'int8': return 'Int8Array';
     case 'uint8': return 'Uint8Array';
+    case 'uint4': return 'Uint8Array';
+    case 'int4': return 'Uint8Array';
   }
 }
 
 // Bytes per element for each data type
+// For uint4/int4, each element is 0.5 bytes (2 elements packed per byte).
 export function bytesPerElement(dataType: MLOperandDataType): number {
   switch (dataType) {
     case 'float32': return 4;
@@ -74,6 +80,8 @@ export function bytesPerElement(dataType: MLOperandDataType): number {
     case 'uint32': return 4;
     case 'int8': return 1;
     case 'uint8': return 1;
+    case 'uint4': return 0.5;
+    case 'int4': return 0.5;
   }
 }
 

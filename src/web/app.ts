@@ -20,6 +20,26 @@ let pendingConversion: {
 /** True when the current model was fetched from a URL (enables dim↔URL sync). */
 let modelFromUrl = false;
 
+/**
+ * Extract a HuggingFace model ID (owner/repo) from a huggingface.co or hf-mirror.com URL.
+ * Returns null for local files or non-HF URLs.
+ * Examples:
+ *   https://huggingface.co/HuggingFaceTB/SmolLM-135M-Instruct/resolve/main/onnx/model.onnx
+ *   → "HuggingFaceTB/SmolLM-135M-Instruct"
+ */
+function extractHfModelId(url: string): string | null {
+  try {
+    const u = new URL(url);
+    if (u.hostname !== 'huggingface.co' && u.hostname !== 'hf-mirror.com') return null;
+    // Path is /{owner}/{repo}/resolve/... or /{owner}/{repo}/blob/...
+    const parts = u.pathname.split('/').filter(Boolean);
+    if (parts.length >= 2) return `${parts[0]}/${parts[1]}`;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 async function handleModelLoaded(
   buffer: Uint8Array,
   fileName: string,
@@ -176,11 +196,17 @@ async function runConversion(
 
     const modelName = fileName.replace(/\.(onnx|tflite)$/i, '');
 
+    // Build HTML title: include HuggingFace model ID when fetched from HF
+    const srcUrl = new URLSearchParams(window.location.search).get('url') ?? '';
+    const hfModelId = extractHfModelId(srcUrl);
+    const title = hfModelId ? `WebNN \u00b7 ${hfModelId} \u00b7 ${modelName}` : undefined;
+
     const result = await convert(buffer, {
       format: 'javascript',
       weightsFileName: `${modelName}.weights`,
       manifestFileName: `${modelName}.manifest.json`,
       modelName,
+      title,
       externalData,
       freeDimensionOverrides,
     });

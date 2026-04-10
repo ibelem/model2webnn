@@ -268,7 +268,7 @@ main {
   box-shadow: var(--shadow-inset);
 }
 
-.btn-sm { padding: 0.25rem 0.5rem; font-size: .9rem; width: 60px; }
+.btn-sm { padding: 0.25rem 0.5rem; font-size: .9rem; }
 
 #coverageWarning {
   padding: .5rem;

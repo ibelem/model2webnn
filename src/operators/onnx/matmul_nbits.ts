@@ -1,6 +1,11 @@
 // Ported from: reference/microsoft/onnxruntime/core/providers/webnn/builders/impl/matMulNBits_op_builder.cc
 // ONNX MatMulNBits → WebNN decomposition: dequantize + transpose + matmul
 // Supports 4-bit quantized weight matrices.
+//
+// Before this emitter runs, fixMatMulNBitsConstants() (in index.ts) has already
+// reinterpreted B from uint8 [N, n_blocks, blob_size] to uint4 [N, n_blocks, blob_size*2]
+// and zero_points from uint8 to uint4 [N, n_blocks, 1].  Raw bytes are unchanged — WebNN's
+// uint4 type interprets each byte as two packed nibbles.
 
 import type { NodeIR } from '../../ir/graph.js';
 import type { CodeEmitter } from '../registry.js';
@@ -8,7 +13,7 @@ import { registerOnnxOp } from '../registry.js';
 
 function emitMatMulNBits(node: NodeIR, emitter: CodeEmitter): void {
   const inputA = emitter.ref(node.inputs[0]);  // [M, K] float
-  const b = emitter.ref(node.inputs[1]);        // quantized weights [N, n_blocks, blob_size]
+  const b = emitter.ref(node.inputs[1]);        // uint4 weights [N, n_blocks, block_size]
   const scales = emitter.ref(node.inputs[2]);    // [N, n_blocks]
   const output = emitter.declare(node.outputs[0]);
 
@@ -25,7 +30,6 @@ function emitMatMulNBits(node: NodeIR, emitter: CodeEmitter): void {
   }
 
   // Reshape scales for broadcasting: [N, n_blocks] → [N, n_blocks, 1]
-  // Use actual dimensions (WebNN reshape does not support ONNX's "0 = copy from input")
   const blockSize = (node.attributes.block_size as number) ?? 32;
   const nBlocks = Math.ceil(K / blockSize);
   const scalesShape = emitter.tensorShape(node.inputs[2]);
@@ -33,32 +37,32 @@ function emitMatMulNBits(node: NodeIR, emitter: CodeEmitter): void {
   if (scalesShape && scalesShape.length === 2 && scalesShape.every((d): d is number => typeof d === 'number')) {
     emitter.line(`const ${scalesReshaped} = builder.reshape(${scales}, [${scalesShape[0]}, ${scalesShape[1]}, 1]);`);
   } else {
-    // Fallback: use N and compute n_blocks from K
     emitter.line(`const ${scalesReshaped} = builder.reshape(${scales}, [${N}, ${nBlocks}, 1]);`);
   }
 
-  // Zero points — must have the same shape as reshaped scales [N, n_blocks_per_col, 1]
+  // Zero points — must be uint4 with shape [N, n_blocks, 1] (same as reshaped scales)
   // See ORT matMulNBits_op_builder.cc: x_zero_point uses x_scale_shape_array
   const hasZeroPoints = node.inputs.length > 3 && node.inputs[3] !== '';
   let zpVar: string;
   if (hasZeroPoints) {
-    // Reshape provided zero points to match scale shape [N, n_blocks, 1]
-    const zpRaw = emitter.ref(node.inputs[3]);
-    zpVar = `${output}_zp_r`;
-    emitter.line(`const ${zpVar} = builder.reshape(${zpRaw}, [${N}, ${nBlocks}, 1]);`);
+    // Zero points constant was already reinterpreted as uint4 [N, n_blocks, 1]
+    // by fixMatMulNBitsConstants — use directly, no reshape needed.
+    zpVar = emitter.ref(node.inputs[3]);
   } else {
-    // Default zero point = 8 for 4-bit, with shape matching reshaped scales
-    const numElements = N * nBlocks * 1;
+    // Default zero point = 8 for unsigned 4-bit (midpoint: 2³).
+    // ORT packs 8 into both nibbles of each byte: (8 | (8 << 4)) = 0x88 = 136.
+    const numUint4Elements = N * nBlocks;
+    const numBytes = Math.ceil(numUint4Elements / 2);
     zpVar = `${output}_default_zp`;
-    emitter.line(`const ${zpVar} = builder.constant({dataType: 'uint8', shape: [${N}, ${nBlocks}, 1]}, new Uint8Array(${numElements}).fill(8));`);
+    emitter.line(`const ${zpVar} = builder.constant({dataType: 'uint4', shape: [${N}, ${nBlocks}, 1]}, new Uint8Array(${numBytes}).fill(136));`);
   }
 
-  // Dequantize: B_float = dequantize(B_uint4, scales, zero_points) → [N, K]
-  // WebNN signature: dequantizeLinear(input, scale, zeroPoint)
+  // DequantizeLinear: B_float = dequantize(B_uint4, scales, zero_points)
+  // B is uint4 [N, n_blocks, block_size], output is float [N, n_blocks, block_size]
   const dequantized = `${output}_dq`;
   emitter.line(`const ${dequantized} = builder.dequantizeLinear(${b}, ${scalesReshaped}, ${zpVar});`);
 
-  // Reshape dequantized to [N, K]
+  // Reshape to [N, K]
   const dqReshaped = `${output}_dq_r`;
   emitter.line(`const ${dqReshaped} = builder.reshape(${dequantized}, [${N}, ${K}]);`);
 

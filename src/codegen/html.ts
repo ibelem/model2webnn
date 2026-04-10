@@ -18,7 +18,7 @@ export function generateHtml(
   const {
     weightsFileName = 'model.weights',
     manifestFileName = 'model.manifest.json',
-    title = `WebNN — ${graph.name}`,
+    title = `WebNN · ${graph.name}`,
   } = options;
 
   const jsCode = generateJavaScriptFixed(graph, {
