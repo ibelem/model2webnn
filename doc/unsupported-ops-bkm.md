@@ -1,8 +1,10 @@
-# BKM: Handling WebNN-Unsupported Ops (TopK, Range, Mod, etc.)
+# BKM: Handling WebNN-Unsupported Ops (TopK, Mod, etc.)
 
 ## Summary
 
-WebNN has no equivalents for several ONNX/TFLite operators such as `TopK`, `Range`, and `Mod`. ORT's WebNN backend also does not support these ops. The code generator uses a **dead-propagation** strategy: unsupported op outputs are marked "dead", all downstream ops that depend on dead tensors are automatically skipped, and the graph exports the last live "frontier" tensors instead of the original model outputs.
+WebNN has no equivalents for several ONNX/TFLite operators such as `TopK` and `Mod`. ORT's WebNN backend also does not support these ops. The code generator uses a **dead-propagation** strategy: unsupported op outputs are marked "dead", all downstream ops that depend on dead tensors are automatically skipped, and the graph exports the last live "frontier" tensors instead of the original model outputs.
+
+> **Note:** `Range` and `ConstantOfShape` have no `MLGraphBuilder` equivalent either, but they are handled by the **constant folding** pipeline — evaluated at build time into pre-computed constants and removed from the graph. They only hit the dead-propagation path in the rare case where their inputs cannot be statically resolved.
 
 ## Problem
 
@@ -26,11 +28,11 @@ Error: Failed to execute 'dispatch' on 'MLContext': Invalid outputs: The number 
 
 ### Unsupported ops confirmed
 
-| Op | In WebNN spec? | In ORT WebNN backend? |
-|----|---------------|----------------------|
-| TopK | No | No |
-| Range | No | No |
-| Mod | No | No |
+| Op | In WebNN spec? | In ORT WebNN backend? | Notes |
+|----|---------------|----------------------|-------|
+| TopK | No | No | Dead-propagated |
+| Range | No | No | Constant-folded when inputs are static; dead-propagated otherwise |
+| Mod | No | No | Dead-propagated |
 
 Verified against `reference/webnn-spec/webnn.idl.txt` and `reference/microsoft/onnxruntime/core/providers/webnn/builders/op_builder_factory.cc`.
 
