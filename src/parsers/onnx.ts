@@ -342,7 +342,7 @@ function pbValueInfo(buf: Uint8Array): TensorInfo | null {
   return name ? { name, dataType, shape } : null;
 }
 
-/** Scan a GraphProto byte slice, collecting initializer names (field 4) and I/O (fields 11, 12).
+/** Scan a GraphProto byte slice, collecting initializer names (field 5) and I/O (fields 11, 12).
  *  Unneeded fields (nodes, value_info, etc.) are skipped with a single ptr advance each. */
 function pbScanGraph(
   buf: Uint8Array,
@@ -356,12 +356,12 @@ function pbScanGraph(
     // eslint-disable-next-line no-bitwise
     const field = tag >>> 3; const wt = tag & 7;
     if (wt !== 2) { pos = pbSkip(buf, p, wt); continue; }
-    if (field !== 4 && field !== 11 && field !== 12) {
+    if (field !== 5 && field !== 11 && field !== 12) {
       // Fast-skip: read length varint, jump over content — no subarray created.
       const [l, n] = pbVarUint(buf, p); pos = n + l; continue;
     }
     const [sub, next] = pbLenView(buf, p); pos = next;
-    if (field === 4) { const name = pbTensorName(sub); if (name) initNames.add(name); }
+    if (field === 5) { const name = pbTensorName(sub); if (name) initNames.add(name); }
     else if (field === 11) { const vi = pbValueInfo(sub); if (vi) inputs.push(vi); }
     else { const vi = pbValueInfo(sub); if (vi) outputs.push(vi); }
   }
