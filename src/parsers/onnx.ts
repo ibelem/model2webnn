@@ -221,42 +221,186 @@ export function getExternalDataRefs(buffer: Uint8Array): string[] {
   return [...paths];
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Minimal zero-copy protobuf scanner — used only by parseOnnxMetadata.
+// Avoids ModelProto.decode() which copies the entire file into the JS heap.
+//
+// Protobuf wire types used below:
+//   0 = varint, 1 = 64-bit, 2 = length-delimited, 5 = 32-bit
+//
+// For a 2 GB model the key saving is on LEN fields (wt=2) we don't need:
+//   pbSkip reads the length varint (≤5 bytes) and adds it to pos — no data touched.
+//   Skipping a 2 GB raw_data initializer field takes O(1) time.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Read an unsigned protobuf varint from buf[pos]. Returns [value, nextPos].
+ *  Handles byte-length values up to 2^32-1 (≥4 GB) via unsigned 32-bit arithmetic. */
+function pbVarUint(buf: Uint8Array, pos: number): [number, number] {
+  /* eslint-disable no-bitwise */
+  let b = buf[pos++]; let v = b & 0x7f;                         if (!(b & 0x80)) return [v, pos];
+  b = buf[pos++]; v |= (b & 0x7f) << 7;                         if (!(b & 0x80)) return [v >>> 0, pos];
+  b = buf[pos++]; v |= (b & 0x7f) << 14;                        if (!(b & 0x80)) return [v >>> 0, pos];
+  b = buf[pos++]; v |= (b & 0x7f) << 21;                        if (!(b & 0x80)) return [v >>> 0, pos];
+  b = buf[pos++]; v = (v | ((b & 0x0f) * 0x10000000)) >>> 0;   if (!(b & 0x80)) return [v, pos];
+  while (pos < buf.length && (buf[pos++] & 0x80));               // skip remaining high bytes of 64-bit varint
+  /* eslint-enable no-bitwise */
+  return [v, pos];
+}
+
+/** Skip over the value portion of a protobuf field (tag already consumed, pos → value). */
+function pbSkip(buf: Uint8Array, pos: number, wt: number): number {
+  if (wt === 0) { while (pos < buf.length && (buf[pos++] & 0x80)); return pos; } // eslint-disable-line no-bitwise
+  if (wt === 1) return pos + 8;
+  if (wt === 2) { const [l, n] = pbVarUint(buf, pos); return n + l; }
+  if (wt === 5) return pos + 4;
+  return pos; // unknown wire type — stop scanning this buffer gracefully
+}
+
+/** Return a zero-copy subarray view of a length-delimited field and the next position. */
+function pbLenView(buf: Uint8Array, pos: number): [Uint8Array, number] {
+  const [len, next] = pbVarUint(buf, pos);
+  return [buf.subarray(next, next + len), next + len];
+}
+
+/** Extract the name field (8) from a TensorProto byte slice.
+ *  Large data fields (raw_data=9, float_data=4, …) are skipped in O(1). */
+function pbTensorName(buf: Uint8Array): string {
+  let pos = 0;
+  while (pos < buf.length) {
+    const [tag, p] = pbVarUint(buf, pos);
+    // eslint-disable-next-line no-bitwise
+    if ((tag >>> 3) === 8 && (tag & 7) === 2) {
+      const [s] = pbLenView(buf, p);
+      return new TextDecoder().decode(s);
+    }
+    pos = pbSkip(buf, p, tag & 7); // eslint-disable-line no-bitwise
+  }
+  return '';
+}
+
+/** Parse a TensorShapeProto into (number | string)[].
+ *  Each Dimension (field 1, wire 2) contains dim_value (f1, varint) or dim_param (f2, string). */
+function pbTensorShape(buf: Uint8Array): (number | string)[] {
+  const dims: (number | string)[] = [];
+  let pos = 0;
+  while (pos < buf.length) {
+    const [tag, p] = pbVarUint(buf, pos);
+    // eslint-disable-next-line no-bitwise
+    const field = tag >>> 3; const wt = tag & 7;
+    if (field === 1 && wt === 2) {
+      const [dimBuf, next] = pbLenView(buf, p);
+      pos = next;
+      let dim: number | string = 'dynamic';
+      let dp = 0;
+      while (dp < dimBuf.length) {
+        const [dt, dnp] = pbVarUint(dimBuf, dp);
+        // eslint-disable-next-line no-bitwise
+        const df = dt >>> 3; const dw = dt & 7;
+        if (df === 1 && dw === 0) { const [v, n] = pbVarUint(dimBuf, dnp); dim = v; dp = n; }
+        else if (df === 2 && dw === 2) { const [s, n] = pbLenView(dimBuf, dnp); dim = new TextDecoder().decode(s); dp = n; }
+        else { dp = pbSkip(dimBuf, dnp, dw); }
+      }
+      dims.push(dim);
+    } else { pos = pbSkip(buf, p, wt); }
+  }
+  return dims;
+}
+
+/** Parse a ValueInfoProto (name=1, TypeProto=2 → Tensor {elem_type=1, shape=2}) into TensorInfo. */
+function pbValueInfo(buf: Uint8Array): TensorInfo | null {
+  let name = ''; let dataType: MLOperandDataType = 'float32'; let shape: (number | string)[] = [];
+  let pos = 0;
+  while (pos < buf.length) {
+    const [tag, p] = pbVarUint(buf, pos);
+    // eslint-disable-next-line no-bitwise
+    const field = tag >>> 3; const wt = tag & 7;
+    if (field === 1 && wt === 2) {
+      const [s, next] = pbLenView(buf, p); name = new TextDecoder().decode(s); pos = next;
+    } else if (field === 2 && wt === 2) {
+      const [typeBuf, next] = pbLenView(buf, p); pos = next;
+      let tp = 0;
+      while (tp < typeBuf.length) {
+        const [ttag, tnp] = pbVarUint(typeBuf, tp);
+        // eslint-disable-next-line no-bitwise
+        const tf = ttag >>> 3; const tw = ttag & 7;
+        if (tf === 1 && tw === 2) {
+          // TypeProto.Tensor {elem_type (1, varint), shape (2, LEN → TensorShapeProto)}
+          const [tbuf, tnext] = pbLenView(typeBuf, tnp); tp = tnext;
+          let t = 0;
+          while (t < tbuf.length) {
+            const [btag, bnp] = pbVarUint(tbuf, t);
+            // eslint-disable-next-line no-bitwise
+            const bf = btag >>> 3; const bw = btag & 7;
+            if (bf === 1 && bw === 0) { const [dt, n] = pbVarUint(tbuf, bnp); dataType = onnxDataType(dt); t = n; }
+            else if (bf === 2 && bw === 2) { const [sb, sn] = pbLenView(tbuf, bnp); shape = pbTensorShape(sb); t = sn; }
+            else { t = pbSkip(tbuf, bnp, bw); }
+          }
+        } else { tp = pbSkip(typeBuf, tnp, tw); }
+      }
+    } else { pos = pbSkip(buf, p, wt); }
+  }
+  return name ? { name, dataType, shape } : null;
+}
+
+/** Scan a GraphProto byte slice, collecting initializer names (field 4) and I/O (fields 11, 12).
+ *  Unneeded fields (nodes, value_info, etc.) are skipped with a single ptr advance each. */
+function pbScanGraph(
+  buf: Uint8Array,
+  initNames: Set<string>,
+  inputs: TensorInfo[],
+  outputs: TensorInfo[],
+): void {
+  let pos = 0;
+  while (pos < buf.length) {
+    const [tag, p] = pbVarUint(buf, pos);
+    // eslint-disable-next-line no-bitwise
+    const field = tag >>> 3; const wt = tag & 7;
+    if (wt !== 2) { pos = pbSkip(buf, p, wt); continue; }
+    if (field !== 4 && field !== 11 && field !== 12) {
+      // Fast-skip: read length varint, jump over content — no subarray created.
+      const [l, n] = pbVarUint(buf, p); pos = n + l; continue;
+    }
+    const [sub, next] = pbLenView(buf, p); pos = next;
+    if (field === 4) { const name = pbTensorName(sub); if (name) initNames.add(name); }
+    else if (field === 11) { const vi = pbValueInfo(sub); if (vi) inputs.push(vi); }
+    else { const vi = pbValueInfo(sub); if (vi) outputs.push(vi); }
+  }
+}
+
 /**
  * Lightweight metadata-only parse of an ONNX model buffer.
- * Returns only the graph inputs and outputs without loading weight/initializer data.
- * Significantly faster than parseOnnx() for large models when only tensor metadata is needed.
+ * Returns only { inputs, outputs } without loading weight/initializer data.
  *
- * Note: the protobuf decoding step still reads the full buffer; the savings come from
- * skipping all typed-array allocations for initializers and all node/shape processing.
+ * Uses a hand-rolled zero-copy protobuf scanner instead of ModelProto.decode().
+ * Skipping a large initializer (e.g. 500 MB raw_data) costs O(1): read a ≤5-byte
+ * length varint and add it to the position counter — the weight bytes are never
+ * touched. Suitable for 2 GB+ models within a tight latency budget.
  */
 export function parseOnnxMetadata(buffer: Uint8Array): { inputs: TensorInfo[]; outputs: TensorInfo[] } {
-  const decoded = onnx.ModelProto.decode(buffer);
-  const graph = decoded.graph;
-  if (!graph) throw new Error('Invalid ONNX model: no graph found');
+  // Locate GraphProto at ModelProto field 7 (wire type 2).
+  let graphBuf: Uint8Array | null = null;
+  let pos = 0;
+  while (pos < buffer.length) {
+    const [tag, p] = pbVarUint(buffer, pos);
+    // eslint-disable-next-line no-bitwise
+    if ((tag >>> 3) === 7 && (tag & 7) === 2) {
+      [graphBuf] = pbLenView(buffer, p);
+      break;
+    }
+    pos = pbSkip(buffer, p, tag & 7); // eslint-disable-line no-bitwise
+  }
+  if (!graphBuf) throw new Error('Invalid ONNX model: no graph found');
 
-  // Initializers appear in both graph.initializer and graph.input; exclude them from inputs.
-  const initializerNames = new Set<string>(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (graph.initializer ?? []).map((init: any) => init.name ?? '')
-  );
+  const initNames = new Set<string>();
+  const inputs: TensorInfo[] = [];
+  const outputs: TensorInfo[] = [];
+  pbScanGraph(graphBuf, initNames, inputs, outputs);
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const inputs: TensorInfo[] = (graph.input ?? [])
-    .filter((inp: any) => !initializerNames.has(inp.name ?? ''))
-    .map((inp: any) => ({
-      name: inp.name ?? '',
-      dataType: extractDataType(inp),
-      shape: extractShape(inp),
-    }));
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const outputs: TensorInfo[] = (graph.output ?? []).map((out: any) => ({
-    name: out.name ?? '',
-    dataType: extractDataType(out),
-    shape: extractShape(out),
-  }));
-
-  return { inputs, outputs };
+  // Filter out initializer names that appear in graph.input (old-format ONNX models, pre-opset 9).
+  return {
+    inputs: initNames.size > 0 ? inputs.filter(inp => !initNames.has(inp.name)) : inputs,
+    outputs,
+  };
 }
 
 export async function parseOnnx(
