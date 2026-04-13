@@ -1041,6 +1041,76 @@ export async function parseTflite(buffer: Uint8Array): Promise<GraphIR> {
   };
 }
 
+/**
+ * Lightweight metadata-only parse of a TFLite/LiteRT model buffer.
+ * Returns only the graph inputs and outputs without loading weight/buffer data.
+ * Significantly faster than parseTflite() for large models when only tensor metadata is needed.
+ *
+ * Buffers (field 4 of the root Model table) are never read, so weight bytes are never touched.
+ */
+export function parseTfliteMetadata(buffer: Uint8Array): { inputs: TensorInfo[]; outputs: TensorInfo[] } {
+  const fb = new FBReader(buffer);
+
+  if (buffer.length >= 8) {
+    const id = String.fromCharCode(buffer[4], buffer[5], buffer[6], buffer[7]);
+    if (id !== 'TFL3') {
+      const rootOffset = fb.int32(0);
+      if (rootOffset <= 0 || rootOffset >= buffer.length) {
+        throw new Error('Invalid TFLite model: bad root table offset');
+      }
+    }
+  }
+
+  const root = fb.rootOffset();
+
+  // Read subgraphs (field 2) — skip buffers (field 4) entirely
+  const sgVecField = fb.field(root, 2);
+  if (!sgVecField) throw new Error('Invalid TFLite model: no subgraphs found');
+  const sgLen = fb.vectorLen(sgVecField);
+  if (sgLen === 0) throw new Error('Invalid TFLite model: no subgraphs found');
+
+  // Use first subgraph — SubGraph fields: tensors(0), inputs(1), outputs(2), operators(3), name(4)
+  const sgOffset = fb.indirect(fb.vectorStart(sgVecField));
+
+  const tensors = readTensors(fb, sgOffset);
+  const inputIndices = readIntVector(fb, sgOffset, 1);
+  const outputIndices = readIntVector(fb, sgOffset, 2);
+
+  const tensorNames = tensors.map((t, i) => t.name || `tensor_${i}`);
+
+  // Build dynamic dim name map from input shape_signatures (-1 means dynamic)
+  const dynamicDimNames = new Map<number, string>();
+  let nextDimId = 0;
+  for (const idx of inputIndices) {
+    const t = tensors[idx];
+    if (!t?.shapeSignature) continue;
+    for (let d = 0; d < t.shapeSignature.length; d++) {
+      if (t.shapeSignature[d] === -1 && !dynamicDimNames.has(d)) {
+        dynamicDimNames.set(d, `dim_${nextDimId++}`);
+      }
+    }
+  }
+
+  function toDynShape(t: TFLiteTensor): (number | string)[] {
+    if (!t.shapeSignature || dynamicDimNames.size === 0) return t.shape;
+    return t.shapeSignature.map((s, i) => (s === -1 ? (dynamicDimNames.get(i) ?? `dim_${i}`) : s));
+  }
+
+  const inputs: TensorInfo[] = inputIndices.map((idx) => ({
+    name: tensorNames[idx],
+    dataType: tfliteDataTypeFromId(tensors[idx].type),
+    shape: toDynShape(tensors[idx]),
+  }));
+
+  const outputs: TensorInfo[] = outputIndices.map((idx) => ({
+    name: tensorNames[idx],
+    dataType: tfliteDataTypeFromId(tensors[idx].type),
+    shape: tensors[idx].shape.length > 0 ? tensors[idx].shape : [],
+  }));
+
+  return { inputs, outputs };
+}
+
 /** Map TFLite TensorType ID to WebNN data type */
 function tfliteDataTypeFromId(typeId: number): MLOperandDataType {
   const name = tensorTypeName(typeId);

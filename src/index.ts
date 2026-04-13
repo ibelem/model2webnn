@@ -1,7 +1,7 @@
 // Public library API — main entry point for model2webnn
 // Converts .onnx / .tflite models into WebNN JavaScript/TypeScript code + WGWT weights.
 
-import type { GraphIR } from './ir/graph.js';
+import type { GraphIR, TensorInfo } from './ir/graph.js';
 import { applyFreeDimensionOverrides, getFreeDimensions, resolveRemainingDynamicDims } from './ir/graph.js';
 import { foldConstants } from './ir/constant-folding.js';
 import { parseOnnx, repropagateReshapeShapes, type ExternalDataMap } from './parsers/onnx.js';
@@ -15,6 +15,15 @@ import { getEmitter } from './operators/registry.js';
 import type { WeightsManifest } from './weights/packer.js';
 
 export type OutputFormat = 'javascript' | 'typescript' | 'html';
+
+/**
+ * Minimal model metadata returned by the lightweight parseOnnxMetadata / parseTfliteMetadata
+ * functions. Contains only graph input and output tensor descriptions; no weight data.
+ */
+export interface ModelMetadata {
+  inputs: TensorInfo[];
+  outputs: TensorInfo[];
+}
 
 export interface ConvertOptions {
   format?: OutputFormat;
@@ -243,8 +252,8 @@ export type { GraphIR, TensorInfo, ConstantInfo, NodeIR, MLOperandDataType } fro
 export { getFreeDimensions, applyFreeDimensionOverrides, resolveRemainingDynamicDims } from './ir/graph.js';
 export type { WeightsManifest, PackedWeights } from './weights/packer.js';
 export type { ExternalDataMap } from './parsers/onnx.js';
-export { parseOnnx, getExternalDataRefs } from './parsers/onnx.js';
-export { parseTflite } from './parsers/tflite.js';
+export { parseOnnx, parseOnnxMetadata, getExternalDataRefs } from './parsers/onnx.js';
+export { parseTflite, parseTfliteMetadata } from './parsers/tflite.js';
 export { packWeights } from './weights/packer.js';
 export { generateJavaScriptFixed as generateJavaScript } from './codegen/javascript.js';
 export { generateTypeScript } from './codegen/typescript.js';

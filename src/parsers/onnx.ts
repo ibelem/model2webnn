@@ -221,6 +221,44 @@ export function getExternalDataRefs(buffer: Uint8Array): string[] {
   return [...paths];
 }
 
+/**
+ * Lightweight metadata-only parse of an ONNX model buffer.
+ * Returns only the graph inputs and outputs without loading weight/initializer data.
+ * Significantly faster than parseOnnx() for large models when only tensor metadata is needed.
+ *
+ * Note: the protobuf decoding step still reads the full buffer; the savings come from
+ * skipping all typed-array allocations for initializers and all node/shape processing.
+ */
+export function parseOnnxMetadata(buffer: Uint8Array): { inputs: TensorInfo[]; outputs: TensorInfo[] } {
+  const decoded = onnx.ModelProto.decode(buffer);
+  const graph = decoded.graph;
+  if (!graph) throw new Error('Invalid ONNX model: no graph found');
+
+  // Initializers appear in both graph.initializer and graph.input; exclude them from inputs.
+  const initializerNames = new Set<string>(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (graph.initializer ?? []).map((init: any) => init.name ?? '')
+  );
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const inputs: TensorInfo[] = (graph.input ?? [])
+    .filter((inp: any) => !initializerNames.has(inp.name ?? ''))
+    .map((inp: any) => ({
+      name: inp.name ?? '',
+      dataType: extractDataType(inp),
+      shape: extractShape(inp),
+    }));
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const outputs: TensorInfo[] = (graph.output ?? []).map((out: any) => ({
+    name: out.name ?? '',
+    dataType: extractDataType(out),
+    shape: extractShape(out),
+  }));
+
+  return { inputs, outputs };
+}
+
 export async function parseOnnx(
   buffer: Uint8Array,
   externalData?: ExternalDataMap,
