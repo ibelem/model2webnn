@@ -5,18 +5,18 @@
   "type": "module",
   "license": "Apache-2.0",
   "bin": {
-    "model2webnn": "./dist/cli.js"
+    "model2webnn": "./lib/cli.js"
   },
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
   "exports": {
     ".": {
-      "import": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "import": "./lib/index.js",
+      "types": "./lib/index.d.ts"
     }
   },
   "files": [
-    "dist/"
+    "lib/"
   ],
   "scripts": {
     "dev": "vite --host",
@@ -25,7 +25,9 @@
     "cli": "tsx src/cli.ts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "tsc --noEmit"
+    "build:lib": "tsc -p tsconfig.build.json",
+    "lint": "tsc --noEmit",
+    "prepublishOnly": "npm run build:lib"
   },
   "dependencies": {
     "jszip": "^3.10.1",
