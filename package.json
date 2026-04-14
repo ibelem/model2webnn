@@ -1,6 +1,6 @@
 {
   "name": "model2webnn",
-  "version": "0.1.0",
+  "version": "0.1.0-alpha.1",
   "description": "Convert ML models (.onnx, .tflite) into ready-to-run WebNN API JavaScript/TypeScript code",
   "type": "module",
   "license": "Apache-2.0",
